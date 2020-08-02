@@ -168,6 +168,7 @@ CREATE TABLE public.users (
     over_18 boolean DEFAULT false,
     creation_ip character varying(255),
     hide_offensive boolean DEFAULT false,
+    dark_mode boolean DEFAULT false,
     is_activated boolean DEFAULT false,
     reddit_username character varying(64) DEFAULT NULL::character varying,
     bio character varying(300) DEFAULT ''::character varying,
