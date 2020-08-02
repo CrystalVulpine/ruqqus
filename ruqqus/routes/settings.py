@@ -191,14 +191,13 @@ def settings_dark_mode(x, v):
         abort(400)
 
     if not v.can_use_darkmode:
-        session["dark_mode_enabled"]=False
+        v.dark_mode=False
         abort(403)
     else:
         #print(f"current cookie is {session.get('dark_mode_enabled')}")
-        session["dark_mode_enabled"]=x
+        v.dark_mode=x
         #print(f"set dark mode @{v.username} to {x}")
         #print(f"cookie is now {session.get('dark_mode_enabled')}")
-        session.modified=True
         return "",204
         
 @app.route("/settings/log_out_all_others", methods=["POST"])
