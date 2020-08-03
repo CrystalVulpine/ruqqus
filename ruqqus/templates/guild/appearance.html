@@ -4,7 +4,7 @@
 
 {% block stylesheets %}
 
-{% if v and v.referral_count and session.get("dark_mode_enabled") %}
+{% if v and v.referral_count and v.can_use_darkmode and v.dark_mode %}
 <link id="css-link" rel="stylesheet" href="/+{{ p.board.name }}/dark.css">
 {% else %}
 <link id="css-link" rel="stylesheet" href="/+{{ p.board.name }}/main.css">
