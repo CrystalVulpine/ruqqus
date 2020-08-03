@@ -1,6 +1,8 @@
 {% extends "embeds/embed_default.html" %}
 
 {% set score=c.score_fuzzed %}
+{% set upvotes=c.upvotes_fuzzed %}
+{% set downvotes=c.downvotes_fuzzed %}
 
 {% block title %}
 <title>@{{ c.author.username }} comments in +{{ c.board.name }} on "{{ c.post.title }}"</title>
@@ -34,7 +36,7 @@
 			{% endif %}
 			<span> </span>
 		{% endif %}
-                <span class="time-stamp"><span>&#183;</span> {{ c.age_string }}</span>
+                <span class="time-stamp"><span>&#183;</span> {{ c.age_string }}</span><span><span>&#183;</span> Votes: +{{ upvotes }}/-{{ downvotes }}</span>
 		{% if c.edited_utc %}
 		<span class="time-edited"><span>&#183;</span> <span class="font-italic">Edited {{ c.edited_string }}</span></span>
 		{% endif %}
