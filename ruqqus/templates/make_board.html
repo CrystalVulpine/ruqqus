@@ -9,7 +9,7 @@
 {% block sidebar %}{% endblock %}
 {% block stylesheets %}
 
-{% if v and v.referral_count and (v.dark_mode or session.get("dark_mode_enabled")) %}
+{% if v and v.referral_count and v.dark_mode %}
 <link id="css-link" rel="stylesheet" href="/assets/style/main_dark.css">
 {% else %}
 <link id="css-link" rel="stylesheet" href="/assets/style/main.css">
