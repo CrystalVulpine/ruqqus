@@ -1,4 +1,6 @@
 {% set score=c.score_fuzzed %}
+{% set upvotes=c.upvotes_fuzzed %}
+{% set downvotes=c.downvotes_fuzzed %}
 {% if v %}
 {% set voted=c.voted %}
 {% set adjust = voted %}
@@ -38,7 +40,7 @@
         {% endif %}
         <span> </span>
         {% endif %}
-        <span class="time-stamp">· {{ c.age_string }}</span>{% if standalone and c.parent_submission and not c.is_public %} · <i class="fas fa-eye-slash text-muted" data-toggle="tooltip" data-placement="bottom" title="Private content, visible because {{ c.visibility_reason(v) }}"></i>{% endif %}
+        <span class="time-stamp">· {{ c.age_string }}</span><span> · Votes: +{{ upvotes }}/-{{ downvotes }}</span>{% if standalone and c.parent_submission and not c.is_public %} · <i class="fas fa-eye-slash text-muted" data-toggle="tooltip" data-placement="bottom" title="Private content, visible because {{ c.visibility_reason(v) }}"></i>{% endif %}
         {% if c.edited_utc %}
         <span class="time-edited"><span>&#183;</span> <span class="font-italic">Edited {{ c.edited_string }}</span></span>
         {% endif %}
