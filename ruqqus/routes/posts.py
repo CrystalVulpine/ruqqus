@@ -154,15 +154,21 @@ def get_post_title(v):
 
 
 @app.route("/submit", methods=['POST'])
+@app.route("/api/v1/submit", methods=["POST"])
 @limiter.limit("6/minute")
 @is_not_banned
 @tos_agreed
 @validate_formkey
+@api("create")
 def submit_post(v):
 
     title=request.form.get("title","")
 
     title=title.lstrip().rstrip()
+    title=title.replace("\n","")
+    title=title.replace("\r","")
+    title=title.replace("\t","")
+    
 
 
     url=request.form.get("url","")
@@ -284,28 +290,33 @@ def submit_post(v):
         board=get_guild('general')
 
     if board.is_banned:
-        return render_template("submit.html",
+        return {"html":lambda:(render_template("submit.html",
                                v=v,
-                               error=f"+{board.name} has been demolished.",
+                               error=f"+{board.name} has been banned.",
                                title=title,
                                url=url
                                , body=request.form.get("body",""),
                                b=get_guild("general",
                                            graceful=True)
-                               ), 403       
+                               ), 403),
+        "api":lambda:(jsonify({"error":f"403 Not Authorized - +{board.name} has been banned."}))
+        }
+
     
     if board.has_ban(v):
-        return render_template("submit.html",
+        return {"html":lambda:(render_template("submit.html",
                                v=v,
                                error=f"You are exiled from +{board.name}.",
                                title=title,
                                url=url
                                , body=request.form.get("body",""),
                                b=get_guild("general")
-                               ), 403
+                               ), 403),
+                "api":lambda:(jsonify({"error":f"403 Not Authorized - You are exiled from +{board.name}"}), 403)
+                }
 
     if (board.restricted_posting or board.is_private) and not (board.can_submit(v)):
-        return render_template("submit.html",
+        return {"html":lambda:(render_template("submit.html",
                                v=v,
                                error=f"You are not an approved contributor for +{board.name}.",
                                title=title,
@@ -314,7 +325,10 @@ def submit_post(v):
                                b=get_guild(request.form.get("board","general"),
                                            graceful=True
                                            )
-                               )
+                               ),403),
+                "api":lambda:(jsonify({"error":f"403 Not Authorized - You are not an approved contributor for +{board.name}"}), 403)
+                }
+
 
 
 
@@ -409,7 +423,6 @@ def submit_post(v):
     if url:
         links=[url]+links
 
-    check_links=[]
     for link in links:
         parse_link=urlparse(link)
         check_url=ParseResult(scheme="https",
@@ -418,26 +431,26 @@ def submit_post(v):
                             params=parse_link.params,
                             query=parse_link.query,
                             fragment='')
-        check_links.append(urlunparse(check_url))
+        check_url=urlunparse(check_url)
 
 
-    badlink=g.db.query(BadLink).filter(BadLink.link.in_(tuple(check_links))).first()
-    if badlink:
-        if badlink.autoban:
-            text="Your Ruqqus account has been suspended for 1 day for the following reason:\n\n> Too much spam!"
-            send_notification(v, text)
-            v.ban(days=1, reason="spam")
+        badlink=g.db.query(BadLink).filter(literal(check_url).contains(BadLink.link)).first()
+        if badlink:
+            if badlink.autoban:
+                text="Your Ruqqus account has been suspended for 1 day for the following reason:\n\n> Too much spam!"
+                send_notification(v, text)
+                v.ban(days=1, reason="spam")
 
-            return redirect('/notifications')
-        else:
-            return render_template("submit.html",
-                       v=v,
-                       error=f"The link `{badlink.link}` is not allowed. Reason: {badlink.reason}",
-                       title=title,
-                       text=body[0:2000],
-                       b=get_guild(request.form.get("board","general"),
-                                   graceful=True)
-                       ), 400
+                return redirect('/notifications')
+            else:
+                return render_template("submit.html",
+                           v=v,
+                           error=f"The link `{badlink.link}` is not allowed. Reason: {badlink.reason}",
+                           title=title,
+                           text=body[0:2000],
+                           b=get_guild(request.form.get("board","general"),
+                                       graceful=True)
+                           ), 400
 
     #check for embeddable video
     domain=parsed_url.netloc
@@ -533,7 +546,9 @@ def submit_post(v):
 
     #print(f"Content Event: @{new_post.author.username} post {new_post.base36id}")
 
-    return redirect(new_post.permalink)
+    return {"html":lambda:redirect(new_post.permalink),
+            "api":lambda:jsonify(new_post.json)
+            }
     
 # @app.route("/api/nsfw/<pid>/<x>", methods=["POST"])
 # @auth_required

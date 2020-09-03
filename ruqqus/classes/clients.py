@@ -2,9 +2,10 @@ from flask import *
 from sqlalchemy import *
 from sqlalchemy.orm import relationship
 
+from .mix_ins import Stndrd
 from ruqqus.__main__ import app, Base
 
-class OauthApp(Base):
+class OauthApp(Base, Stndrd):
 
 	__tablename__="oauth_apps"
 
@@ -15,9 +16,20 @@ class OauthApp(Base):
 	redirect_uri=Column(String(4096))
 	author_id=Column(Integer, ForeignKey("users.id"))
 	is_banned=Column(Boolean, default=False)
+	description=Column(String(256), default=None)
+
+	author=relationship("User")
+
+	def __repr__(self):
+		return f"<OauthApp(id={self.id})>"
+
+	@property
+	def permalink(self):
+
+		return f"/admin/app/{self.base36id}"
 
 
-class ClientAuth(Base):
+class ClientAuth(Base, Stndrd):
 
 	__tablename__="client_auths"
 

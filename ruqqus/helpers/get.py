@@ -4,6 +4,8 @@ from ruqqus.classes import *
 from flask import g
 from sqlalchemy.orm import joinedload
 
+import re
+
 def get_user(username, v=None, nSession=None, graceful=False):
 
     username=username.replace('\\','')
@@ -42,6 +44,43 @@ def get_user(username, v=None, nSession=None, graceful=False):
 
     return user
 
+def get_account(base36id, v=None, nSession=None, graceful=False):
+
+    if not nSession:
+        nSession=g.db
+
+    id=base36decode(base36id)
+        
+
+    user=nSession.query(User
+        ).filter(
+        User.id==id
+        ).first()
+
+    if not user:
+        if not graceful:
+            abort(404)
+        else:
+            return None
+
+    if v:
+        block=nSession.query(UserBlock).filter(
+            or_(
+                and_(
+                    UserBlock.user_id==v.id, 
+                    UserBlock.target_id==user.id
+                    ),
+                and_(UserBlock.user_id==user.id,
+                    UserBlock.target_id==v.id
+                    )
+                )
+            ).first()
+
+        user._is_blocking=block and block.user_id==v.id
+        user._is_blocked=block and block.target_id==v.id
+
+    return user
+
 def get_post(pid, v=None, graceful=False, nSession=None, **kwargs):
 
     if isinstance(pid, str):
@@ -54,16 +93,23 @@ def get_post(pid, v=None, graceful=False, nSession=None, **kwargs):
     if v:
         vt=nSession.query(Vote).filter_by(user_id=v.id, submission_id=i).subquery()
         mod=nSession.query(ModRelationship).filter_by(user_id=v.id, invite_rescinded=False).subquery()
+        boardblocks=nSession.query(BoardBlock).filter_by(user_id=v.id).subquery()
+        blocking=v.blocking.subquery()
 
 
-        items= nSession.query(Submission, vt.c.vote_type, mod.c.id
+        items= nSession.query(
+                Submission, 
+                vt.c.vote_type, 
+                mod.c.id,
+                boardblocks.c.id,
+                blocking.c.id
             ).options(
             joinedload(Submission.author).joinedload(User.title)
-            ).filter(Submission.id==i).join(
-            vt, 
-            vt.c.submission_id==Submission.id, 
-            isouter=True
+            ).filter(Submission.id==i
+            ).join(vt, vt.c.submission_id==Submission.id, isouter=True
             ).join(mod, mod.c.board_id==Submission.board_id, isouter=True
+            ).join(boardblocks, boardblocks.c.board_id==Submission.board_id, isouter=True
+            ).join(blocking, blocking.c.target_id==Submission.author_id, isouter=True
             ).first()
         
         if not items:
@@ -72,11 +118,13 @@ def get_post(pid, v=None, graceful=False, nSession=None, **kwargs):
         x=items[0]
         x._voted=items[1] or 0
         x._is_guildmaster=items[2] or 0
+        x._is_blocking_guild=items[3] or 0
+        x._is_blocking=items[4] or 0
 
     else:
         x=nSession.query(Submission).options(
             joinedload(Submission.author).joinedload(User.title)
-            ).filter(Submission.id==i).filter(Submission.id==i).first()
+            ).filter(Submission.id==i).first()
 
     if not x and not graceful:
         abort(404)
@@ -93,14 +141,31 @@ def get_posts(pids, sort="hot", v=None):
 
     if v:
         for pid in pids:
+            
             vt=g.db.query(Vote).filter_by(submission_id=pid, user_id=v.id).subquery()
             mod=g.db.query(ModRelationship).filter_by(user_id=v.id, invite_rescinded=False).subquery()
-            query=g.db.query(Submission, vt.c.vote_type, mod.c.id
+            boardblocks=g.db.query(BoardBlock).filter_by(user_id=v.id).subquery()
+            blocking=v.blocking.subquery()
+            blocked=v.blocked.subquery()
+            subs=v.subscriptions.filter_by(is_active=True).subquery()
+
+            query=g.db.query(
+                    Submission,
+                    vt.c.vote_type, 
+                    mod.c.id, 
+                    boardblocks.c.id,
+                    blocking.c.id,
+                    blocked.c.id,
+                    subs.c.id
                 ).options(joinedload(Submission.author).joinedload(User.title)
                 ).filter_by(id=pid
                 ).join(vt, vt.c.submission_id==Submission.id, isouter=True
                 ).join(mod, mod.c.board_id==Submission.board_id, isouter=True
-            )
+                ).join(boardblocks, boardblocks.c.board_id==Submission.board_id, isouter=True
+                ).join(blocking, blocking.c.target_id==Submission.author_id, isouter=True
+                ).join(blocked, blocked.c.user_id==Submission.author_id, isouter=True
+                ).join(subs, subs.c.board_id==Submission.board_id, isouter=True
+                )
             queries.append(query)
 
         queries=tuple(queries)
@@ -116,6 +181,10 @@ def get_posts(pids, sort="hot", v=None):
         for i in range(len(output)):
             output[i]._voted=posts[i][1] or 0
             output[i]._is_guildmaster=posts[i][2] or 0
+            output[i]._is_blocking_guild=posts[i][3] or 0
+            output[i]._is_blocking=posts[i][4] or 0
+            output[i]._is_blocked=posts[i][5] or 0
+            output[i]._is_subscribed=posts[i][6] or 0
     else:
         for pid in pids:
             query=g.db.query(Submission
@@ -339,7 +408,7 @@ def get_comments(cids, v=None, nSession=None, sort_type="new", load_parent=False
 
 def get_board(bid, graceful=False):
 
-    x=g.db.query(Board).filter_by(id=base36decode(bid)).first()
+    x=g.db.query(Board).options(joinedload(Board.moderators).joinedload(ModRelationship.user)).filter_by(id=base36decode(bid)).first()
     if not x:
         if graceful:
             return None
@@ -354,7 +423,7 @@ def get_guild(name, graceful=False):
     name=name.replace('\\', '')
     name=name.replace('_','\_')
 
-    x=g.db.query(Board).filter(Board.name.ilike(name)).first()
+    x=g.db.query(Board).options(joinedload(Board.moderators).joinedload(ModRelationship.user)).filter(Board.name.ilike(name)).first()
     if not x:
         if not graceful:
             abort(404)
@@ -406,7 +475,52 @@ def get_mod(uid, bid):
 
     return mod
 
-def get_application(client_id):
+def get_application(client_id, graceful=False):
 
     application = g.db.query(OauthApp).filter_by(client_id=client_id).first()
+    if not application and not graceful:
+        abort(404)
+
     return application
+
+def get_from_permalink(link, v=None):
+
+    if "@" in link:
+
+        name=re.search("/@(\w+)", link).match(1)
+        return get_user(name)
+
+    if "+" in link:
+
+        name=re.search("/\+(\w+)", link).match(1)
+        return get_guild(name)
+
+    ids=re.search("://[^/]+/post/(\w+)/[^/]+(/(\w+))?", link)
+
+    post_id=ids.group(1)
+    comment_id=ids.group(3)
+
+    if comment_id:
+        return get_comment(comment_id, v=v)
+
+    else:
+        return get_post(post_id, v=v)
+
+def get_from_fullname(fullname, v=None, graceful=False):
+
+    parts = fullname.split('_')
+
+    if len(parts)<2:
+        abort(400)
+
+    kind=parts[0]
+    b36=parts[1]
+
+    if kind=='t1':
+        return get_account(b36, v=v, graceful=graceful)
+    elif kind=='t2':
+        return get_post(b36, v=v, graceful=graceful)
+    elif kind=='t3':
+        return get_comment(b36, v=v, graceful=graceful)
+    elif kind=='t4':
+        return get_board(b36, v=v, graceful=graceful)

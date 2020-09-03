@@ -54,7 +54,7 @@ class Comment(Base, Age_times, Scores, Stndrd, Fuzzing):
     is_nsfl=Column(Boolean, default=False)
 
     post=relationship("Submission")
-    flags=relationship("CommentFlag", lazy="subquery", backref="comment")
+    flags=relationship("CommentFlag", backref="comment")
     author=relationship("User", lazy="joined", innerjoin=True, primaryjoin="User.id==Comment.author_id")
     board=association_proxy("post", "board")
     original_board=relationship("Board", primaryjoin="Board.id==Comment.original_board_id")
@@ -79,7 +79,7 @@ class Comment(Base, Age_times, Scores, Stndrd, Fuzzing):
     rank_fiery=deferred(Column(Float, server_default=FetchedValue()))
     rank_hot=deferred(Column(Float, server_default=FetchedValue()))
 
-    flag_count=deferred(Column(Integer, server_default=FetchedValue()))
+    #flag_count=deferred(Column(Integer, server_default=FetchedValue()))
 
     board_id=deferred(Column(Integer, server_default=FetchedValue()))
     
@@ -327,6 +327,11 @@ class Comment(Base, Age_times, Scores, Stndrd, Fuzzing):
     def ban_reason(self, x):
         self.comment_aux.ban_reason=x
         g.db.add(self.comment_aux)
+
+    @property
+    def flag_count(self):
+        return len(self.flags)
+    
     
     
     

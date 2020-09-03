@@ -207,7 +207,7 @@ def board_name(name, v):
                            is_subscribed=(v and board.has_subscriber(v)
                                           )
                                           ),
-            'api':lambda:[x.json for x in posts]
+            'api':lambda:jsonify({"data":[x.json for x in posts]})
             }
 
 
@@ -405,24 +405,38 @@ def mod_invite_username(bid, board, v):
     username=request.form.get("username",'').lstrip('@')
     user=get_user(username)
 
-    if not board.can_invite_mod(user):
-        return jsonify({"error":f"@{user.username} is already a mod or has already been invited."}), 409
+
 
 
     if not user.can_join_gms:
         return jsonify({"error":f"@{user.username} already leads enough guilds."}), 409
 
-    if not board.has_rescinded_invite(user):
 
-        #notification
+    x=g.db.query(ModRelationship).filter_by(user_id=user.id, board_id=board.id).first()
+
+    if x and x.accepted:
+        return jsonify({"error":f"@{user.username} is already a mod."}), 409
+
+    if x and not x.invite_rescinded:
+        return jsonify({"error":f"@{user.username} has already been invited."}), 409
+
+
+
+
+    if x:
+
+        x.invite_rescinded=False
+        g.db.add(x)
+
+    else:
+        new_mod=ModRelationship(user_id=user.id,
+                            board_id=board.id,
+                            accepted=False)
 
         text=f"You have been invited to join +{board.name} as a guildmaster. You can [click here]({board.permalink}/mod/mods) and accept this invitation. Or, if you weren't expecting this, you can ignore it."
         send_notification(user, text)
 
-    new_mod=ModRelationship(user_id=user.id,
-                            board_id=board.id,
-                            accepted=False)
-    g.db.add(new_mod)
+        g.db.add(new_mod)
     
     
     return "", 204
@@ -525,6 +539,20 @@ def mod_bid_settings_nsfw(bid,  board, v):
 
     g.db.add(board)
     
+
+    return "",204
+
+
+@app.route("/mod/<bid>/settings/opt_out", methods=["POST"])
+@auth_required
+@is_guildmaster
+@validate_formkey
+def mod_bid_settings_optout(bid,  board, v):
+
+    # nsfw
+    board.all_opt_out = bool(request.form.get("opt_out", False)=='true')
+
+    g.db.add(board)
 
     return "",204
 
@@ -750,14 +778,14 @@ def subscribe_board(boardname, v):
             #reactivate canceled sub
             sub.is_active=True
             g.db.add(sub)
-            
-            return jsonify({"message":f"Joined +{board.name}"}), 200
 
+    else:
     
-    new_sub=Subscription(user_id=v.id,
+        new_sub=Subscription(user_id=v.id,
                          board_id=board.id)
 
-    g.db.add(new_sub)
+        g.db.add(new_sub)
+
     g.db.flush()
     
 
@@ -806,21 +834,23 @@ def board_mod_queue(boardname, board, v):
 
     page=int(request.args.get("page",1))
 
-    posts = g.db.query(Submission).filter_by(board_id=board.id,
+    ids = g.db.query(Submission.id).filter_by(board_id=board.id,
                                            is_banned=False,
                                            mod_approved=None
-                                           ).filter(Submission.report_count>=1)
+                                           ).join(Report, Report.post_id==Submission.id)
 
     if not v.over_18:
-        posts=posts.filter_by(over_18=False)
+        ids=ids.filter_by(over_18=False)
 
-    posts=posts.order_by(Submission.report_count.desc()).offset((page-1)*25).limit(26)
+    ids=ids.order_by(Submission.id.desc()).offset((page-1)*25).limit(26)
 
-    posts=[x for x in posts]
+    ids=[x for x in ids]
 
-    next_exists=(len(posts)==26)
+    next_exists=(len(ids)==26)
 
-    posts=posts[0:25]
+    ids=ids[0:25]
+
+    posts=get_posts(ids, v=v)
 
     return render_template("guild/reported_posts.html",
                            listing=posts,
@@ -837,21 +867,23 @@ def all_mod_queue(v):
 
     board_ids=[x.board_id for x in v.moderates.filter_by(accepted=True).all()]
 
-    posts = g.db.query(Submission).filter(Submission.board_id.in_(board_ids),
+    ids = g.db.query(Submission.id).options(lazyload('*')).filter(Submission.board_id.in_(board_ids),
                                         Submission.mod_approved==None,
-                                        Submission.report_count >=1,
-                                        Submission.is_banned==False)
+                                        Submission.is_banned==False
+                                        ).join(Report, Report.post_id==Submission.id)
 
     if not v.over_18:
-        posts=posts.filter_by(over_18=False)
+        ids=ids.filter(Submission.over_18==False)
 
-    posts=posts.order_by(Submission.report_count.desc()).offset((page-1)*25).limit(26)
+    ids=ids.order_by(Submission.id.desc()).offset((page-1)*25).limit(26)
 
-    posts=[x for x in posts]
+    ids=[x for x in ids]
 
-    next_exists=(len(posts)==26)
+    next_exists=(len(ids)==26)
 
-    posts=posts[0:25]
+    ids=ids[0:25]
+
+    posts=get_posts(ids, v=v)
 
     return render_template("guild/reported_posts.html",
                            listing=posts,
@@ -1091,7 +1123,7 @@ def siege_guild(v):
     g.db.add(v)
 
     #check guild count
-    if not v.can_join_gms:
+    if not v.can_join_gms and guild not in v.boards_modded:
         return render_template("message.html",
                                v=v,
                                title=f"Siege against +{guild.name} Failed",
@@ -1198,7 +1230,8 @@ def siege_guild(v):
     #delete and notify mods
     for x in guild.moderators:
 
-        send_notification(x.user,
+        if x.accepted:
+            send_notification(x.user,
                           f"You have been overthrown from +{guild.name}.")
         g.db.delete(x)
         

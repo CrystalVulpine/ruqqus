@@ -495,7 +495,7 @@ report_commentModal = function(id, author) {
 
   document.getElementById("comment-author").textContent = author;
 
-  offtopic.disabled=true;
+  //offtopic.disabled=true;
 
   document.getElementById("reportCommentButton").onclick = function() {
 
@@ -729,7 +729,10 @@ function post_toast(url, callback) {
       $('#toast-post-success').toast('dispose');
       $('#toast-post-success').toast('show');
       document.getElementById('toast-post-success-text').innerText = JSON.parse(xhr.response)["message"];
-      callback()
+      callback(xhr)
+
+    } else if (xhr.status >= 300 && xhr.status < 400) {
+      window.location.href = JSON.parse(xhr.response)["redirect"]
     } else {
       $('#toast-post-error').toast('dispose');
       $('#toast-post-error').toast('show');

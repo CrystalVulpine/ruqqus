@@ -9,6 +9,7 @@ from ruqqus.helpers.session import *
 import ruqqus.helpers.aws as aws
 from .userblock import *
 from .submission import *
+from .subscriptions import *
 from .board_relationships import *
 from .comment import Comment
 from .mix_ins import *
@@ -39,10 +40,11 @@ class Board(Base, Stndrd, Age_times):
     color_nonce=Column(Integer, default=0)
     rank_trending=Column(Float, default=0)
     stored_subscriber_count=Column(Integer, default=1)
+    all_opt_out=Column(Boolean, default=False)
 
-    moderators=relationship("ModRelationship", lazy="dynamic")
+    moderators=relationship("ModRelationship")
     subscribers=relationship("Subscription", lazy="dynamic")
-    submissions=relationship("Submission", lazy="dynamic", primaryjoin="Board.id==Submission.board_id")
+    submissions=relationship("Submission", primaryjoin="Board.id==Submission.board_id")
     contributors=relationship("ContributorRelationship", lazy="dynamic")
     bans=relationship("BanRelationship", lazy="dynamic")
     postrels=relationship("PostRelationship", lazy="dynamic")
@@ -68,25 +70,31 @@ class Board(Base, Stndrd, Age_times):
     @property
     def mods_list(self):
 
-        z= [x for x in self.moderators.filter_by(accepted=True).order_by(ModRelationship.id.asc()).all() if not x.user.is_deleted]
+        z= [x for x in self.moderators if x.accepted and not (x.user.is_deleted or (x.user.is_banned and not x.user.unban_utc))]
+
+        z=sorted(z, key=lambda x: x.id)
         return z
 
     @property
     def mods(self):
 
-        z= [x.user for x in self.moderators.filter_by(accepted=True).order_by(ModRelationship.id.asc()).all()]
+        z= [x.user for x in self.moderators if x.accepted]
+
+        z=sorted(z, key=lambda x: x.id)
+
         return z
 
     @property
     def invited_mods(self):
         
-        z=[x.user for x in self.moderators.filter_by(accepted=False, invite_rescinded=False).order_by(ModRelationship.id.asc()).all()]
+        z=[x.user for x in self.moderators if x.accepted==False and x.invite_rescinded==False]
+        z=sorted(z, key=lambda x: x.id)
         return z
 
     @property
     def mods_count(self):
 
-        return self.moderators.filter_by(accepted=True).count()
+        return len([x for x in self.moderators if x.accepted and not x.invite_rescinded])
 
     @property
     def permalink(self):
@@ -178,23 +186,32 @@ class Board(Base, Stndrd, Age_times):
         if self.is_banned:
             return False
 
-        return self.moderators.filter_by(user_id=user.id, accepted=True).first()
+        for x in user.moderates:
+            if x.board_id==self.id and x.accepted and not x.invite_rescinded:
+                return x
+
+        return False
 
 
     def can_invite_mod(self, user):
 
-        return user.id not in [x.user_id for x in self.moderators.filter_by(invite_rescinded=False).all()]
+        return user.id not in [x.user_id for x in self.moderators if not x.invite_rescinded]
 
     def has_rescinded_invite(self, user):
 
-        return user.id in [x.user_id for x in self.moderators.filter_by(invite_rescinded=True).all()]
+        return user.id in [x.user_id for x in self.moderators if x.invite_rescinded==True]
 
     def has_invite(self, user):
 
         if user is None:
             return None
 
-        return self.moderators.filter_by(user_id=user.id, accepted=False, invite_rescinded=False).first()
+        for x in [i for i in self.moderators if not i.invite_rescinded and not i.accepted]:
+
+            if x.user_id==user.id:
+                return x
+
+        return None
         
     def has_ban(self, user):
 
@@ -208,14 +225,14 @@ class Board(Base, Stndrd, Age_times):
         if not user:
             return False
 
-        return bool(self.subscribers.filter_by(board_id=self.id, user_id=user.id, is_active=True).first())
+        return self.id in [x.board_id for x in user.subscriptions.all() if x.is_active]
 
     def has_contributor(self, user):
 
         if user is None:
             return False
 
-        return self.contributors.filter_by(user_id=user.id, is_active=True).first()
+        return g.db.query(ContributorRelationship).filter_by(user_id=user.id, board_id=self.id, is_active=True).first()
 
     def can_submit(self, user):
 
@@ -343,8 +360,9 @@ class Board(Base, Stndrd, Age_times):
                 g.db.query(Comment).filter_by(author_id=user.id, original_board_id=self.id).first()
                 )
     @property
+    @lazy
     def n_pins(self):
-        return self.submissions.filter_by(is_pinned=True).count()
+        return g.db.query(Submission).filter_by(board_id=self.id, is_pinned=True).count()
 
     @property
     def can_pin_another(self):
@@ -381,3 +399,7 @@ class Board(Base, Stndrd, Age_times):
                 'color':"#"+self.color
                 }
 
+
+    @property
+    def show_settings_icons(self):
+        return self.is_private or self.restricted_posting or self.over_18 or self.all_opt_out

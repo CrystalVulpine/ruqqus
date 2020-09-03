@@ -2,6 +2,7 @@ import time
 from flask import *
 from sqlalchemy import *
 from sqlalchemy.orm import lazyload
+import random
 
 from ruqqus.helpers.wrappers import *
 from ruqqus.helpers.get import *
@@ -29,6 +30,7 @@ def notifications(v):
     cids=cids[0:25]
 
     comments=get_comments(cids, v=v, sort_type="new", load_parent=True)
+
     listing=[]
     for c in comments:
         c._is_blocked=False
@@ -126,6 +128,20 @@ def frontlist(v=None, sort="hot", page=1, nsfw=False, t=None, ids_only=True, **k
         posts=posts.filter_by(post_public=True)
 
 
+    #board opt out of all
+    if v:
+        posts=posts.join(Submission.board).filter(
+            or_(
+                Board.all_opt_out==False,
+                Submission.board_id.in_(
+                    g.db.query(Subscription.board_id).filter_by(user_id=v.id, is_active=True).subquery()
+                    )
+                )
+            ).options(contains_eager(Submission.board))
+    else:
+        posts=posts.join(Submission.board).filter_by(all_opt_out=False).options(contains_eager(Submission.board))
+
+
 
     if t:
         now=int(time.time())
@@ -207,7 +223,7 @@ def home(v):
                                time_filter=t,
                                page=page,
                                only=only),
-                'api':lambda:[x.json for x in posts]
+                'api':lambda:jsonify({"data":[x.json for x in posts]})
                 }
     else:
         return front_all()
@@ -262,7 +278,7 @@ def front_all(v):
                                             v=v,
                                             listing=posts
                                             ),
-            'api':lambda:[x.json for x in posts]
+            'api':lambda:jsonify({"data":[x.json for x in posts]})
             }
 
 @cache.memoize(600)
@@ -344,7 +360,7 @@ def browse_guilds(v):
                            next_exists=next_exists,
                            sort_method=sort_method
                             ),
-            "api":lambda:[board.json for board in boards]
+            "api":lambda:jsonify({"data":[board.json for board in boards]})
             }
 
 @app.route('/mine', methods=["GET"])
@@ -393,7 +409,7 @@ def my_subs(v):
     elif kind=="users":
 
         u=g.db.query(User)
-        follows=v.following.subquery()
+        follows=g.db.query(Follow).filter_by(user_id=v.id).subquery()
 
         content=u.join(follows,
                        User.id==follows.c.target_id,
@@ -435,10 +451,15 @@ def random_post(v):
         x=x.filter_by(is_offensive=False)
 
     if v:
-        bans=g.db.query(BanRelationship.id).filter_by(user_id=v.id).all()
-        x=x.filter(Submission.board_id.notin_([i[0] for i in bans]))
+        bans=g.db.query(BanRelationship.board_id).filter_by(user_id=v.id).subquery()
+        x=x.filter(Submission.board_id.notin_(bans))
 
-    post = x.order_by(func.random()).first()
+    total=x.count()
+    n=random.randint(0, total-1)
+
+
+
+    post = x.order_by(Submission.id.asc()).offset(n).limit(1).first()
     return redirect(post.permalink)
 
 @app.route("/random/guild", methods=["GET"])
@@ -455,7 +476,11 @@ def random_guild(v):
         bans=g.db.query(BanRelationship.id).filter_by(user_id=v.id).all()
         x=x.filter(Board.id.notin_([i[0] for i in bans]))
 
-    board=x.order_by(func.random()).first()
+
+    total=x.count()
+    n=random.randint(0, total-1)
+
+    board=x.order_by(Board.id.asc()).offset(n).limit(1).first()
 
     return redirect(board.permalink)
 
@@ -470,7 +495,10 @@ def random_comment(v):
     if v:
         bans=g.db.query(BanRelationship.id).filter_by(user_id=v.id).all()
         x=x.filter(Comment.board_id.notin_([i[0] for i in bans]))
-    comment=x.order_by(func.random()).first()
+
+    total=x.count()
+    n=random.randint(0, total-1)
+    comment=x.order_by(Comment.id.asc()).offset(n).limit(1).first()
 
     return redirect(comment.permalink)
 
@@ -480,6 +508,10 @@ def random_user(v):
     x=g.db.query(User).filter(or_(User.is_banned==0, and_(User.is_banned>0, User.unban_utc<int(time.time()))))
 
     x=x.filter_by(is_private=False)
-    user=x.order_by(func.random()).first()
+
+    total=x.count()
+    n=random.randint(0, total-1)
+
+    user=x.offset(n).limit(1).first()
 
     return redirect(user.permalink)
