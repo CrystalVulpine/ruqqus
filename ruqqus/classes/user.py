@@ -403,7 +403,7 @@ class User(Base, Stndrd, Age_times):
     @property
     @cache.memoize(timeout=3600)
     def true_score(self):
-        return max((self.karma + self.comment_karma), -5)
+        return (self.karma + self.comment_karma) if (v and (v.admin_level >= 3 or v.id == self.id)) else max((self.karma + self.comment_karma), -5)
 
     @property
     def base36id(self):
@@ -695,7 +695,7 @@ class User(Base, Stndrd, Age_times):
     @property
     def total_karma(self):
 
-        return 503 if self.id==1 else max(self.karma + self.comment_karma, -5)
+        return 503 if self.id==1 else (self.karma + self.comment_karma if (v and (v.admin_level >= 3 or v.id == self.id)) else max(self.karma + self.comment_karma, -5))
 
     @property
     def can_use_darkmode(self):
