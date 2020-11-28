@@ -112,7 +112,12 @@ $('#new_email').on('input', function () {
         if (max < 48 && max > 0) {
           for (var i = 0; i <= max; i++) {
             gifURL[i] = "https://media.giphy.com/media/" + response.data[i].id + "/200w_d.gif";
-            container.innerHTML += ('<div class="card bg-white" style="overflow: hidden" data-dismiss="modal" aria-label="Close" onclick="insertGIF(\'' + 'https://media.giphy.com/media/' + response.data[i].id + '/100w.gif' + '\',\'' + commentFormID + '\')"><div class="gif-cat-overlay"></div><img class="img-fluid" src="' + gifURL[i] + '"></div>');
+            if (response.data[i].username==''){
+              container.innerHTML += ('<div class="card bg-white" style="overflow: hidden" data-dismiss="modal" aria-label="Close" onclick="insertGIF(\'' + 'https://media.giphy.com/media/' + response.data[i].id + '/100w.gif' + '\',\'' + commentFormID + '\')"><div class="gif-cat-overlay"></div><img class="img-fluid" src="' + gifURL[i] + '"></div>');
+            }
+            else {
+              container.innerHTML += ('<div class="card bg-white" style="overflow: hidden" data-dismiss="modal" aria-label="Close" title="by '+response.data[i].username+' on GIPHY" onclick="insertGIF(\'' + 'https://media.giphy.com/media/' + response.data[i].id + '/100w.gif' + '\',\'' + commentFormID + '\')"><div class="gif-cat-overlay"></div><img class="img-fluid" src="' + gifURL[i] + '"></div>');
+            }
             noGIFs.innerHTML = null;
             loadGIFs.innerHTML = '<div class="text-center py-3"><div class="mb-3"><i class="fad fa-grin-beam-sweat text-gray-500" style="font-size: 3.5rem;"></i></div><p class="font-weight-bold text-gray-500 mb-0">Thou&#39;ve reached the end of the list!</p></div>';
           }
@@ -125,7 +130,12 @@ $('#new_email').on('input', function () {
         else {
           for (var i = 0; i <= 48; i++) {
             gifURL[i] = "https://media.giphy.com/media/" + response.data[i].id + "/200w_d.gif";
-            container.innerHTML += ('<div class="card bg-white" style="overflow: hidden" data-dismiss="modal" aria-label="Close" onclick="insertGIF(\'' + 'https://media.giphy.com/media/' + response.data[i].id + '/100w.gif' + '\',\'' + commentFormID + '\')"><div class="gif-cat-overlay"></div><img class="img-fluid" src="' + gifURL[i] + '"></div>');
+            if (response.data[i].username==''){
+              container.innerHTML += ('<div class="card bg-white" style="overflow: hidden" data-dismiss="modal" aria-label="Close" onclick="insertGIF(\'' + 'https://media.giphy.com/media/' + response.data[i].id + '/100w.gif' + '\',\'' + commentFormID + '\')"><div class="gif-cat-overlay"></div><img class="img-fluid" src="' + gifURL[i] + '"></div>');
+            }
+            else {
+              container.innerHTML += ('<div class="card bg-white" style="overflow: hidden" data-dismiss="modal" aria-label="Close" title="by '+response.data[i].username+' on GIPHY" onclick="insertGIF(\'' + 'https://media.giphy.com/media/' + response.data[i].id + '/100w.gif' + '\',\'' + commentFormID + '\')"><div class="gif-cat-overlay"></div><img class="img-fluid" src="' + gifURL[i] + '"></div>');
+            }
             noGIFs.innerHTML = null;
             loadGIFs.innerHTML = '<div class="text-center py-3"><div class="mb-3"><i class="fad fa-grin-beam-sweat text-gray-500" style="font-size: 3.5rem;"></i></div><p class="font-weight-bold text-gray-500 mb-0">Thou&#39;ve reached the end of the list!</p></div>';
           }
@@ -495,7 +505,7 @@ report_commentModal = function(id, author) {
 
   document.getElementById("comment-author").textContent = author;
 
-  offtopic.disabled=true;
+  //offtopic.disabled=true;
 
   document.getElementById("reportCommentButton").onclick = function() {
 
@@ -725,21 +735,25 @@ function post_toast(url, callback) {
   xhr.withCredentials=true;
 
   xhr.onload = function() {
-    if (xhr.status >= 200 && xhr.status < 300) {
-      $('#toast-post-success').toast('dispose');
-      $('#toast-post-success').toast('show');
-      document.getElementById('toast-post-success-text').innerText = JSON.parse(xhr.response)["message"];
-      callback()
-    } else {
-      $('#toast-post-error').toast('dispose');
-      $('#toast-post-error').toast('show');
-      document.getElementById('toast-post-error-text').innerText = JSON.parse(xhr.response)["error"];
-    }
-  };
+    if (xhr.status==204) {}
+      else if (xhr.status >= 200 && xhr.status < 300) {
+        $('#toast-post-success').toast('dispose');
+        $('#toast-post-success').toast('show');
+        document.getElementById('toast-post-success-text').innerText = JSON.parse(xhr.response)["message"];
+        callback(xhr)
 
-  xhr.send(form);
+      } else if (xhr.status >= 300 && xhr.status < 400) {
+        window.location.href = JSON.parse(xhr.response)["redirect"]
+      } else {
+        $('#toast-post-error').toast('dispose');
+        $('#toast-post-error').toast('show');
+        document.getElementById('toast-post-error-text').innerText = JSON.parse(xhr.response)["error"];
+      }
+    };
 
-}
+    xhr.send(form);
+
+  }
 
 
 //Admin post modding
@@ -959,11 +973,8 @@ var upvote = function(event) {
     }
   }
 
-  for (var n = 0; n < 1; n++) {
-    callback=function() {
-    }
-    post("/api/vote/" + type + "/" + id + "/" + voteDirection, callback, "Unable to vote at this time. Please try again later.")
-  }
+  post_toast("/api/vote/" + type + "/" + id + "/" + voteDirection);
+  
 }
 
 var downvote = function(event) {
@@ -1011,11 +1022,8 @@ var downvote = function(event) {
     }
   }
 
-  for (var n = 0; n < 1; n++) {
-    callback=function() {
-    }
-    post("/api/vote/" + type + "/" + id + "/" + voteDirection, callback, "Unable to vote at this time. Please try again later.")
-  }
+  post_toast("/api/vote/" + type + "/" + id + "/" + voteDirection);
+  
 }
 
 var upvoteButtons = document.getElementsByClassName('upvote-button')
@@ -1691,7 +1699,7 @@ block_user=function() {
     f.append("username", username);
     f.append("formkey", formkey());
     xhr.onload=function(){
-      if (xhr.status==204) {
+      if (xhr.status<300) {
         window.location.reload(true);
       }
       else {
@@ -1715,6 +1723,7 @@ post_comment=function(fullname){
   form.append('parent_fullname', fullname);
   form.append('submission', document.getElementById('reply-form-submission-'+fullname).value);
   form.append('body', document.getElementById('reply-form-body-'+fullname).value);
+  form.append('file', document.getElementById('file-upload-reply-'+fullname).files[0]);
 
 
   var xhr = new XMLHttpRequest();
@@ -1811,12 +1820,98 @@ filter_guild=function() {
         window.location.reload(true);
       }
       else {
-      $('#toast-exile-error').toast('dispose');
-      $('#toast-exile-error').toast('show');
-      exileError.textContent = JSON.parse(xhr.response)["error"];
+        $('#toast-exile-error').toast('dispose');
+        $('#toast-exile-error').toast('show');
+        exileError.textContent = JSON.parse(xhr.response)["error"];
       }
     }
     xhr.send(f)
   }
 
 }
+
+coin_quote = function() {
+
+  var coins = document.getElementById('select-coins');
+  var btn = document.getElementById('buy-coin-btn')
+
+  coin_count = coins.selectedOptions[0].value
+
+  var xhr = new XMLHttpRequest();
+  xhr.open('get', '/shop/get_price?coins='+coin_count)
+
+  xhr.onload=function(){
+    var s = 'Buy '+ coin_count + ' Coin';
+
+    if (coin_count > 1){s = s+'s'};
+
+    s=s+': $'+JSON.parse(xhr.response)["price"];
+
+    btn.value=s;
+  }
+  xhr.send()
+}
+
+// Tipping
+/*
+var tipModal = function(event) {
+  console.log('opened modal, tipModal function triggered')
+  var id = event.target.dataset.contentId;
+  var content = event.target.dataset.contentType;
+  var link = event.target.dataset.contentLink;
+
+  var recipient = event.target.dataset.authorUsername;
+
+  var senderPFP = event.target.dataset.vAvatar;
+  var recipientPFP = event.target.dataset.authorAvatar;
+
+  document.getElementById('tip-sender-pfp').src = senderPFP;
+  document.getElementById('tip-recipient-pfp').src = recipientPFP;
+
+  document.getElementById("tip-content-type").innerText = content
+  document.getElementById("tip-recipient-username").innerText = recipient
+
+  document.getElementById("sendTipButton").onclick = function() {
+    post_toast('/gift_'+ content +'/' + id + '?coins=1',
+      callback = function() {
+        location.href = link
+      }
+      )
+  }
+
+  console.log(senderPFP, recipientPFP, id, content, link, recipient)
+}
+*/
+
+
+var tipModal2 = function(id, content, link, recipient, recipientPFP) {
+  console.log('opened modal, tipModal2 function triggered')
+
+  document.getElementById('tip-recipient-pfp').src = recipientPFP;
+
+  document.getElementById("tip-content-type").innerText = content
+  document.getElementById("tip-recipient-username").innerText = recipient
+
+  document.getElementById("sendTipButton").onclick = function() {
+    post_toast('/gift_'+ content +'/' + id + '?coins=1',
+      callback = function() {
+        location.href = link
+      }
+      )
+  }
+
+  console.log(recipientPFP, id, content, link, recipient)
+}
+
+/*
+var tipModalButtons = document.getElementsByClassName('tip-modal-button')
+
+for (var i = 0; i < tipModalButtons.length; i++) {
+  tipModalButtons[i].addEventListener('click', tipModal, false);
+  tipModalButtons[i].addEventListener('keydown', function(event) {
+    if (event.keyCode === 13) {
+      tipModal(event)
+    }
+  }, false)
+}
+*/
