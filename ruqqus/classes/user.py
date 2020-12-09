@@ -745,12 +745,8 @@ class User(Base, Stndrd, Age_times):
             self.unban_utc = ban_time
 
         else:
-            # Takes care of all functions needed for account termination
+            # Takes care of all functions needed for permanent suspension.
             self.unban_utc = 0
-            if self.has_banner:
-                self.del_banner()
-            if self.has_profile:
-                self.del_profile()
 
             add_role(self, "banned")
             delete_role(self, "member")
@@ -769,6 +765,7 @@ class User(Base, Stndrd, Age_times):
         self.is_banned = 0
         self.unban_utc = 0
 
+        add_role(self, "member")
         delete_role(self, "banned")
 
         g.db.add(self)
