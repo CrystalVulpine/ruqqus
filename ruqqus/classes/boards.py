@@ -72,8 +72,7 @@ class Board(Base, Stndrd, Age_times):
     @property
     def mods_list(self):
 
-        z = [x for x in self.moderators if x.accepted and not (
-            x.user.is_deleted or (x.user.is_banned and not x.user.unban_utc))]
+        z = [x for x in self.moderators if x.accepted and not x.user.is_deleted]
 
         z = sorted(z, key=lambda x: x.id)
         return z
