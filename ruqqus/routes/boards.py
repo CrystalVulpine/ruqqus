@@ -460,6 +460,12 @@ def mod_invite_username(bid, board, v):
 
     if not user.can_join_gms:
         return jsonify({"error": f"@{user.username} already leads enough guilds."}), 409
+        
+    if user.is_deleted:
+        return jsonify({"error": f"@{user.username} is deleted."}), 409
+        
+    if user.is_suspended:
+        return jsonify({"error": f"@{user.username} is suspended."}), 409
 
     x = g.db.query(ModRelationship).filter_by(
         user_id=user.id, board_id=board.id).first()
