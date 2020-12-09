@@ -1225,6 +1225,14 @@ def siege_guild(v):
                                title=f"Siege against +{guild.name} Failed",
                                error="You already lead the maximum number of guilds."
                                ), 403
+                               
+    # Cannot siege banned guilds
+    if guild.is_banned:
+        return render_template("message.html",
+                               v=v,
+                               title=f"Siege against +{guild.name} Failed",
+                               error=f"+{guild.name} is banned."
+                               ), 403
 
     # Cannot siege +general, +ruqqus, +ruqquspress, +ruqqusdmca
     if not guild.is_siegable:
