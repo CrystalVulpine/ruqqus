@@ -91,7 +91,7 @@ class Board(Base, Stndrd, Age_times):
     def invited_mods(self):
 
         z = [x.user for x in self.moderators if x.accepted ==
-             False and x.invite_rescinded == False]
+             False and x.invite_rescinded == False and not x.user.is_deleted]
         z = sorted(z, key=lambda x: x.id)
         return z
 
