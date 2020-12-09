@@ -98,7 +98,7 @@ class Board(Base, Stndrd, Age_times):
     def mods_count(self):
 
         return len(
-            [x for x in self.moderators if x.accepted and not x.invite_rescinded])
+            [x for x in self.moderators if x.accepted and not x.invite_rescinded and not x.user.is_deleted])
 
     @property
     def permalink(self):
