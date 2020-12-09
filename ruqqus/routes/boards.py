@@ -306,7 +306,7 @@ def mod_ban_bid_user(bid, board, v):
 
     user = get_user(request.form.get("username"), graceful=True)
 
-    if not user:
+    if not user or user.is_deleted:
         return jsonify({"error": "That user doesn't exist."}), 404
 
     if user.id == v.id:
@@ -790,7 +790,9 @@ def board_about_exiled(boardname, board, v):
     bans = board.bans.filter_by(is_active=True).order_by(
         BanRelationship.created_utc.desc()).offset(25 * (page - 1)).limit(26)
 
-    bans = [ban for ban in bans]
+    # Deleted users will still remove a spot on the page but this will stop them from cluttering it
+    bans = [ban for ban in bans if not ban.user.is_deleted]
+
     next_exists = (len(bans) == 26)
     bans = bans[0:25]
 
@@ -814,7 +816,9 @@ def board_about_contributors(boardname, board, v):
     contributors = board.contributors.filter_by(is_active=True).order_by(
         ContributorRelationship.created_utc.desc()).offset(25 * (page - 1)).limit(26)
 
-    contributors = [x for x in contributors]
+    # Deleted users will still remove a spot on the page but this will stop them from cluttering it
+    contributors = [x for x in contributors if not x.user.is_deleted]
+
     next_exists = (len(contributors) == 26)
     contributors = contributors[0:25]
 
@@ -1128,7 +1132,7 @@ def mod_approve_bid_user(bid, board, v):
 
     user = get_user(request.form.get("username"), graceful=True)
 
-    if not user:
+    if not user or user.is_deleted:
         return jsonify({"error": "That user doesn't exist."}), 404
 
     if board.has_ban(user):
