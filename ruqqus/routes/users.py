@@ -251,6 +251,10 @@ def follow_user(username, v):
 
     target = get_user(username)
 
+    # don't follow yourself
+    if target.id == v.id:
+        abort(409)
+
     # check for existing follow
     if g.db.query(Follow).filter_by(user_id=v.id, target_id=target.id).first():
         abort(409)
