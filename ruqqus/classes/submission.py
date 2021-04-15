@@ -33,6 +33,8 @@ class SubmissionAux(Base):
     body_html = Column(String(20000), default="")
     ban_reason = Column(String(128), default="")
     embed_url = Column(String(256), default="")
+    meta_title=Column(String(512), default="")
+    meta_description=Column(String(1024), default="")
 
 
 class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
@@ -51,7 +53,8 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
     edited_utc = Column(BigInteger, default=0)
     created_utc = Column(BigInteger, default=0)
     is_banned = Column(Boolean, default=False)
-    is_deleted = Column(Boolean, default=False)
+    deleted_utc = Column(Integer, default=0)
+    purged_utc = Column(Integer, default=0)
     distinguish_level = Column(Integer, default=0)
     gm_distinguish = Column(Integer, ForeignKey("boards.id"), default=0)
     distinguished_board = relationship("Board", lazy="joined", primaryjoin="Board.id==Submission.gm_distinguish")
@@ -84,7 +87,6 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
     score_activity = Column(Float, default=0)
     is_offensive = Column(Boolean, default=False)
     is_nsfl = Column(Boolean, default=False)
-    is_politics = Column(Boolean, default=False)
     board = relationship(
         "Board",
         lazy="joined",
@@ -98,9 +100,11 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
     is_pinned = Column(Boolean, default=False)
     score_best = Column(Float, default=0)
     reports = relationship("Report", backref="submission")
+    is_bot = Column(Boolean, default=False)
 
     upvotes = Column(Integer, default=1)
     downvotes = Column(Integer, default=0)
+    creation_region=Column(String(2), default=None)
 
     app_id=Column(Integer, ForeignKey("oauth_apps.id"), default=None)
     oauth_app=relationship("OauthApp")
@@ -153,6 +157,12 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
         return base36encode(self.board_id)
 
     @property
+    @lazy
+    def is_deleted(self):
+        return bool(self.deleted_utc)
+    
+
+    @property
     def is_repost(self):
         return bool(self.repost_id)
 
@@ -163,7 +173,7 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
     @property
     @lazy
     def fullname(self):
-        return f"t2_{self.base36id}"
+        return f"t2_{self.base36id}"    
         
     @property
     @lazy
@@ -195,7 +205,7 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
     def rendered_page(self, comment=None, comment_info=None, v=None):
 
         # check for banned
-        if self.is_deleted:
+        if self.deleted_utc > 0:
             template = "submission_deleted.html"
         elif v and v.admin_level >= 3:
             template = "submission.html"
@@ -215,7 +225,8 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
             # load and tree comments
             # calling this function with a comment object will do a comment
             # permalink thing
-            self.tree_comments(comment=comment)
+            if "replies" not in self.__dict__ and "_preloaded_comments" in self.__dict__:
+                self.tree_comments(comment=comment)
 
         # return template
         is_allowed_to_comment = self.board.can_comment(
@@ -233,7 +244,6 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
                                comment_info=comment_info,
                                is_allowed_to_comment=is_allowed_to_comment,
                                render_replies=True,
-                               is_guildmaster=self.board.has_mod(v),
                                b=self.board
                                )
 
@@ -250,7 +260,9 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
 
     def tree_comments(self, comment=None, v=None):
 
-        comments = self._preloaded_comments
+        comments = self.__dict__.get('_preloaded_comments',[])
+        if not comments:
+            return
 
         pinned_comment=[]
 
@@ -302,7 +314,8 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
 
     def visibility_reason(self, v):
 
-        if v and self.author_id == v.id:
+
+        if not v or self.author_id == v.id:
             return "this is your content."
         elif self.is_pinned:
             return "a guildmaster has pinned it."
@@ -322,14 +335,46 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
         else:
             self.is_offensive = False
 
-    def determine_politics(self):
+    @property
 
-        for x in g.db.query(PoliticsWord).all():
-            if (self.body and x.check(self.body)) or x.check(self.title):
-                self.is_politics = True
-                break
-        else:
-            self.is_offensive = False
+    def json_raw(self):
+        data = {'author_name': self.author.username if not self.author.is_deleted else None,
+                'permalink': self.permalink,
+                'is_banned': bool(self.is_banned),
+                'is_deleted': self.is_deleted,
+                'created_utc': self.created_utc,
+                'id': self.base36id,
+                'fullname': self.fullname,
+                'title': self.title,
+                'is_nsfw': self.over_18,
+                'is_nsfl': self.is_nsfl,
+                'is_bot': self.is_bot,
+                'thumb_url': self.thumb_url,
+                'domain': self.domain,
+                'is_archived': self.is_archived,
+                'url': self.url,
+                'body': self.body,
+                'body_html': self.body_html,
+                'created_utc': self.created_utc,
+                'edited_utc': self.edited_utc or 0,
+                'guild_name': self.board.name,
+                'guild_id': base36encode(self.board_id),
+                'comment_count': self.comment_count,
+                'score': self.score_fuzzed,
+                'upvotes': self.upvotes_fuzzed,
+                'downvotes': self.downvotes_fuzzed,
+                'award_count': self.award_count,
+                'is_offensive': self.is_offensive,
+                'meta_title': self.meta_title,
+                'meta_description': self.meta_description
+                }
+        if self.ban_reason:
+            data["ban_reason"]=self.ban_reason
+
+        if self.board_id != self.original_board_id and self.original_board:
+            data['original_guild_name'] = self.original_board.name
+            data['original_guild_id'] = base36encode(self.original_board_id)
+        return data
 
     @property
     def json_core(self):
@@ -351,41 +396,15 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
                     'permalink': self.permalink,
                     'guild_name': self.board.name
                     }
-        data = {'author_name': self.author.username if not self.author.is_deleted else None,
-                'permalink': self.permalink,
-                'is_banned': False,
-                'is_deleted': False,
-                'created_utc': self.created_utc,
-                'id': self.base36id,
-                'fullname': self.fullname,
-                'title': self.title,
-                'is_nsfw': self.over_18,
-                'is_nsfl': self.is_nsfl,
-                'thumb_url': self.thumb_url,
-                'domain': self.domain,
-                'is_archived': self.is_archived,
-                'url': self.url,
-                'body': self.body,
-                'body_html': self.body_html,
-                'created_utc': self.created_utc,
-                'edited_utc': self.edited_utc or 0,
-                'guild_name': self.board.name,
-                'is_archived': self.is_archived,
-                'original_guild_name': self.original_board.name if not self.board_id == self.original_board_id else None,
-                'comment_count': self.comment_count,
-                'score': self.score_fuzzed,
-                'upvotes': self.upvotes_fuzzed,
-                'downvotes': self.downvotes_fuzzed,
-                'award_count': self.award_count,
-                'is_offensive': self.is_offensive,
-                'is_politics': self.is_politics
-                }
-        return data
+
+        return self.json_raw
 
     @property
     def json(self):
+
         data=self.json_core
-        if self.is_deleted or self.is_banned:
+        
+        if self.deleted_utc > 0 or self.is_banned:
             return data
 
         data["author"]=self.author.json_core
@@ -465,8 +484,35 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
         g.db.add(self.submission_aux)
 
     @property
-    def is_guildmaster(self):
-        return self.__dict__.get('_is_guildmaster', False)
+    def meta_title(self):
+        return self.submission_aux.meta_title
+
+    @meta_title.setter
+    def meta_title(self, x):
+        self.submission_aux.meta_title=x
+        g.db.add(self.submission_aux)
+
+    @property
+    def meta_description(self):
+        return self.submission_aux.meta_description
+
+    @meta_description.setter
+    def meta_description(self, x):
+        self.submission_aux.meta_description=x
+        g.db.add(self.submission_aux)
+    
+
+    def is_guildmaster(self, perm=None):
+        mod=self.__dict__.get('_is_guildmaster', False)
+
+        if not mod:
+            return False
+        elif not perm:
+            return True
+        else:
+            return mod.perm_full or mod.__dict__[f"perm_{perm}"]
+
+        return output
 
     @property
     def is_blocking_guild(self):
@@ -503,6 +549,51 @@ class Submission(Base, Stndrd, Age_times, Scores, Fuzzing):
     @property
     def embed_template(self):
         return f"site_embeds/{self.domain_obj.embed_template}.html"
+
+    @property
+    def self_download_json(self):
+
+        #This property should never be served to anyone but author and admin
+        if not self.is_banned and self.deleted_utc == 0:
+            return self.json_core
+
+        data= {
+            "title":self.title,
+            "author": self.author.username,
+            "url": self.url,
+            "body": self.body,
+            "body_html": self.body_html,
+            "is_banned": bool(self.is_banned),
+            "deleted_utc": self.deleted_utc,
+            'created_utc': self.created_utc,
+            'id': self.base36id,
+            'fullname': self.fullname,
+            'guild_name': self.board.name,
+            'comment_count': self.comment_count,
+            'permalink': self.permalink
+        }
+
+        if self.original_board_id and (self.original_board_id!= self.board_id):
+
+            data['original_guild_name'] = self.original_board.name
+
+        return data
+
+    @property
+    def json_admin(self):
+
+        data=self.json_raw
+
+        data["creation_ip"]=self.creation_ip
+        data["creation_region"]=self.creation_region
+
+        return data
+
+    @property
+    def is_exiled_for(self):
+        return self.__dict__.get('_is_exiled_for', None)
+
+    
     
 class SaveRelationship(Base, Stndrd):
 

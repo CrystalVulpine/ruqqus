@@ -1,5 +1,5 @@
 from urllib.parse import urlparse
-from time import time
+import time
 
 from ruqqus.helpers.wrappers import *
 from ruqqus.helpers.base36 import *
@@ -27,11 +27,24 @@ def api_vote_post(post_id, x, v):
 
     x = int(x)
 
+    if x==-1:
+        count=g.db.query(Vote).filter(
+            Vote.user_id.in_(
+                tuple(
+                    [v.id]+[x.id for x in v.alts]
+                    )
+                ),
+            Vote.created_utc > (int(time.time())-3600), 
+            Vote.vote_type==-1
+            ).count()
+        if count >=15:
+            return jsonify({"error": "You're doing that too much. Try again later."}), 403
+
     post = get_post(post_id)
 
     if post.is_banned:
         return jsonify({"error":"That post has been removed."}), 403
-    elif post.is_deleted:
+    elif post.deleted_utc > 0:
         return jsonify({"error":"That post has been deleted."}), 403
     elif post.is_archived:
         return jsonify({"error":"That post is archived and can no longer be voted on."}), 403
@@ -102,7 +115,7 @@ def api_vote_comment(comment_id, x, v):
 
     if comment.is_banned:
         return jsonify({"error":"That comment has been removed."}), 403
-    elif comment.is_deleted:
+    elif comment.deleted_utc > 0:
         return jsonify({"error":"That comment has been deleted."}), 403
     elif comment.post.is_archived:
         return jsonify({"error":"This post and its comments are archived and can no longer be voted on."}), 403

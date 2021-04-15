@@ -1,6 +1,6 @@
 server {
     
-    server_name dev.ruqqus.com ruqqus.com ruqq.us c.ruqq.us ruqqus.org ruqqus.win *.amazonaws.com;
+    server_name dev.ruqqus.com ruqqus.com ruqq.us c.ruqq.us ruqqus.org ruqqus.win *.amazonaws.com cc5j4aqdgznut4ns.onion;
 
     proxy_set_header Host $host;
     proxy_set_header X-Real-IP $remote_addr;
@@ -38,6 +38,12 @@ server {
         return 404;
     }
 
+    location /socket.io {
+        proxy_pass http://127.0.0.1:5001;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
     location / {
         proxy_pass http://127.0.0.1:5000;
     }
@@ -46,6 +52,8 @@ server {
     location /error_page/ {
         alias /home/ubuntu/ruqqus/ruqqus/templates/errors/;
     }
+
+
 }
 
 server {

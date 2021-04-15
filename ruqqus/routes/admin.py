@@ -5,6 +5,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import lazyload
 import threading
 import subprocess
+import imagehash
+from os import remove
+from PIL import Image as IMAGE
 
 from ruqqus.helpers.wrappers import *
 from ruqqus.helpers.alerts import *
@@ -12,8 +15,12 @@ from ruqqus.helpers.base36 import *
 from ruqqus.helpers.sanitize import *
 from ruqqus.helpers.get import *
 from ruqqus.classes import *
+from ruqqus.classes.domains import reasons as REASONS
 from ruqqus.routes.admin_api import create_plot, user_stat_data
+from ruqqus.classes.categories import CATEGORIES
 from flask import *
+
+import ruqqus.helpers.aws as aws
 from ruqqus.__main__ import app
 
 
@@ -25,6 +32,7 @@ def flagged_posts(v):
 
     posts = g.db.query(Submission).filter_by(
         is_approved=0,
+        purged_utc=0,
         is_banned=False
     ).join(Submission.flags
            ).options(contains_eager(Submission.flags)
@@ -77,8 +85,8 @@ def flagged_comments(v):
     posts = g.db.query(Comment
                        ).filter_by(
         is_approved=0,
-        is_banned=False,
-        is_deleted=False
+        purged_utc=0,
+        is_banned=False
     ).join(Comment.flags).options(contains_eager(Comment.flags)
                                   ).order_by(Comment.id.desc()).offset(25 * (page - 1)).limit(26).all()
 
@@ -193,13 +201,23 @@ def users_list(v):
     next_exists = (len(users) == 26)
     users = users[0:25]
 
-    data = user_stat_data().get_json()
-
     return render_template("admin/new_users.html",
                            v=v,
                            users=users,
                            next_exists=next_exists,
                            page=page,
+                           )
+
+@app.route("/admin/data", methods=["GET"])
+@admin_level_required(2)
+def admin_data(v):
+
+    data = user_stat_data().get_json()
+
+    return render_template("admin/new_users.html",
+                           v=v,
+                           next_exists=False,
+                           page=1,
                            single_plot=data['single_plot'],
                            multi_plot=data['multi_plot']
                            )
@@ -218,13 +236,13 @@ def participation_stats(v):
             "locked_negative_users": g.db.query(User).filter(User.negative_balance_cents>0).count(),
             "total_posts": g.db.query(Submission).count(),
             "posting_users": g.db.query(Submission.author_id).distinct().count(),
-            "listed_posts": g.db.query(Submission).filter_by(is_banned=False, is_deleted=False).count(),
+            "listed_posts": g.db.query(Submission).filter_by(is_banned=False).filter(Submission.deleted_utc > 0).count(),
             "removed_posts": g.db.query(Submission).filter_by(is_banned=True).count(),
-            "deleted_posts": g.db.query(Submission).filter_by(is_deleted=True).count(),
+            "deleted_posts": g.db.query(Submission).filter(Submission.deleted_utc > 0).count(),
             "total_comments": g.db.query(Comment).count(),
             "commenting_users": g.db.query(Comment.author_id).distinct().count(),
             "removed_comments": g.db.query(Comment).filter_by(is_banned=True).count(),
-            "deleted_comments": g.db.query(Comment).filter_by(is_deleted=True).count(),
+            "deleted_comments": g.db.query(Comment).filter(Comment.deleted_utc>0).count(),
             "total_guilds": g.db.query(Board).count(),
             "listed_guilds": g.db.query(Board).filter_by(is_banned=False, is_private=False).count(),
             "private_guilds": g.db.query(Board).filter_by(is_banned=False, is_private=True).count(),
@@ -444,9 +462,14 @@ def admin_link_accounts(v):
     u1 = int(request.form.get("u1"))
     u2 = int(request.form.get("u2"))
 
-    new_alt = Alt(user1=u1, user2=u2)
+    new_alt = Alt(
+        user1=u1, 
+        user2=u2,
+        is_manual=True
+        )
 
     g.db.add(new_alt)
+    g.db.commit()
 
     return redirect(f"/admin/alt_votes?u1={g.db.query(User).get(u1).username}&u2={g.db.query(User).get(u2).username}")
 
@@ -495,14 +518,17 @@ def admin_gm(v):
         boards=user.boards_modded
 
         alts=user.alts
-        earliest=user
+        main=user
+        main_count=user.submissions.count() + user.comments.count()
         for alt in alts:
 
             if not alt.is_valid and not include_banned:
                 continue
 
-            if alt.created_utc < earliest.created_utc:
-                earlest=alt
+            count = alt.submissions.count() + alt.comments.count()
+            if count > main_count:
+                main_count=count
+                main=alt
 
             for b in alt.boards_modded:
                 if b not in boards:
@@ -512,7 +538,7 @@ def admin_gm(v):
         return render_template("admin/alt_gms.html",
             v=v,
             user=user,
-            first=earliest,
+            first=main,
             boards=boards
             )
     else:
@@ -580,8 +606,16 @@ def admin_ban_analysis(v):
 def admin_paypaltxns(v):
 
     page=int(request.args.get("page",1))
+    user=request.args.get('user','')
 
-    txns = g.db.query(PayPalTxn).filter_by(status=3).order_by(PayPalTxn.created_utc.desc())
+    txns = g.db.query(PayPalTxn).filter(PayPalTxn.status!=1)
+
+    if user:
+        user=get_user(user)
+        txns=txns.filter_by(user_id=user.id)
+
+
+    txns=txns.order_by(PayPalTxn.created_utc.desc())
 
     txns = [x for x in txns.offset(100*(page-1)).limit(101).all()]
 
@@ -594,6 +628,182 @@ def admin_paypaltxns(v):
         txns=txns, 
         next_exists=next_exists,
         page=page
+        )
+
+@app.route("/admin/domain/<domain_name>", methods=["GET"])
+@admin_level_required(4)
+def admin_domain_domain(domain_name, v):
+
+    d_query=domain_name.replace("_","\_")
+    domain=g.db.query(Domain).filter_by(domain=d_query).first()
+
+    if not domain:
+        domain=Domain(domain=domain_name)
+
+    return render_template(
+        "admin/manage_domain.html",
+        v=v,
+        domain_name=domain_name,
+        domain=domain,
+        reasons=REASONS
+        )
+
+@app.route("/admin/category", methods=["POST"])
+@admin_level_required(4)
+@validate_formkey
+def admin_category_lock(v):
+
+    board=get_guild(request.form.get("board"))
+
+    cat_id=int(request.form.get("category"))
+
+    sc=g.db.query(SubCategory).filter_by(id=cat_id).first()
+    if not sc:
+        abort(400)
+
+    board.subcat_id=cat_id
+    lock=bool(request.form.get("lock"))
+
+    g.db.add(board)
+
+    ma1=ModAction(
+        board_id=board.id,
+        user_id=v.id,
+        kind="update_settings",
+        note=f"category={sc.category.name} / {sc.name} | admin action"
+        )
+    g.db.add(ma1)
+
+    if lock != board.is_locked_category:
+        board.is_locked_category = lock
+        ma2=ModAction(
+            board_id=board.id,
+            user_id=v.id,
+            kind="update_settings",
+            note=f"category_locked={lock} | admin action"
+            )
+        g.db.add(ma2)
+
+    return redirect(f"{board.permalink}/mod/log")
+
+
+@app.route("/admin/category", methods=["GET"])
+@admin_level_required(4)
+def admin_category_get(v):
+
+    return render_template(
+        "admin/category.html", 
+        v=v,
+        categories=CATEGORIES,
+        b=get_board(request.args.get("guild"), graceful=True)
+        )
+
+@app.route("/admin/user_data", methods=["GET"])
+@admin_level_required(5)
+def admin_user_data_get(v):
+
+    name=request.values.get("username",'')
+
+    user=get_user(user, graceful=True)
+
+    if not name or not user:
+        return render_template("admin/user_data.html", v=v)
+
+    post_ids = [x[0] for x in g.db.query(Submission.id).filter_by(author_id=user.id).order_by(Submission.created_utc.desc()).all()]
+    posts=get_posts(post_ids)
+
+    comment_ids=[x[0] for x in g.db.query(Comment.id).filter_by(author_id=user.id).order_by(Comment.created_utc.desc()).all()]
+    comments=get_comments(comment_ids)
+
+
+
+    return jsonify(
+        {
+        "submissions":[x.json_admin for x in posts],
+        "comments":[x.json_admin for x in comments],
+        "user":user.json_admin
+            }
+        )
+        
+@app.route("/admin/image_purge", methods=["POST"])
+@admin_level_required(5)
+def admin_image_purge(v):
+    
+    url=request.form.get("url")
+
+    parsed_url=urlparse(url)
+
+    name=parsed_url.path.lstrip('/')
+
+    try:
+        print(name)
+    except:
+        pass
+
+
+    aws.delete_file(name)
+
+    return "", 204
+
+
+@app.route("/admin/ip/<ipaddr>", methods=["GET"])
+@admin_level_required(5)
+def admin_ip_addr(ipaddr, v):
+
+    pids=[x.id for x in g.db.query(Submission).filter_by(creation_ip=ipaddr).order_by(Submission.created_utc.desc()).all()]
+
+    cids=[x.id for x in g.db.query(Comment).filter(Comment.creation_ip==ipaddr, Comment.parent_submission!=None).order_by(Comment.created_utc.desc()).all()]
+
+    return render_template(
+        "admin/ip.html",
+        v=v,
+        users=g.db.query(User).filter_by(creation_ip=ipaddr).order_by(User.created_utc.desc()).all(),
+        listing=get_posts(pids) if pids else [],
+        comments=get_comments(cids) if cids else [],
+        standalone=True,
+        ip=ipaddr
+        )
+
+@app.route("/admin/test", methods=["GET"])
+@admin_level_required(5)
+def admin_test_ip(v):
+
+    return f"IP: {request.remote_addr}; fwd: {request.headers.get('X-Forwarded-For')}"
+
+
+@app.route("/admin/siege_count")
+@admin_level_required(3)
+def admin_siege_count(v):
+
+    board=get_guild(request.args.get("board"))
+    recent=int(request.args.get("days",0))
+
+    now=int(time.time())
+
+    cutoff=board.stored_subscriber_count//10 + min(recent, (now-board.created_utc)//(60*60*24))
+
+    uids=g.db.query(Subscription.user_id).filter_by(is_active=True, board_id=board.id).all()
+    uids=[x[0] for x in uids]
+
+    can_siege=0
+    total=0
+    for uid in uids:
+        posts=sum([x[0] for x in g.db.query(Submission.score_top).options(lazyload('*')).filter_by(author_id=uid).filter(Submission.created_utc>now-60*60*24*recent).all()])
+        comments=sum([x[0] for x in g.db.query(Comment.score_top).options(lazyload('*')).filter_by(author_id=uid).filter(   Comment.created_utc>now-60*60*24*recent).all()])
+        rep=posts+comments
+        if rep>=cutoff:
+            can_siege+=1
+        total+=1
+        print(f"{can_siege}/{total}")
+
+
+
+    return jsonify(
+        {
+        "guild":f"+{board.name}",
+        "requirement":cutoff,
+        "eligible_users":can_siege
+        }
         )
 
 
@@ -616,3 +826,82 @@ def admin_paypaltxns(v):
 
 
 #     return "1"
+
+
+@app.route("/admin/purge_guild_images/<boardname>", methods=["POST"])
+@admin_level_required(5)
+@validate_formkey
+def admin_purge_guild_images(boardname, v):
+
+    #Iterates through all posts in guild with thumbnail, and nukes thumbnails and i.ruqqus uploads
+
+    board=get_guild(boardname)
+
+    if not board.is_banned:
+        return jsonify({"error":"This guild isn't banned"}), 409
+
+    if board.has_profile:
+        board.del_profile()
+
+    if board.has_banner:
+        board.del_banner()
+
+    posts = g.db.query(Submission).options(lazyload('*')).filter_by(board_id=board.id, has_thumb=True)
+
+
+    i=0
+
+    for post in posts:
+        i+=1
+        aws.delete_file(urlparse(post.thumb_url).path.lstrip('/'))
+        post.has_thumb=False
+
+        if post.url and post.domain=="i.ruqqus.com":
+            aws.delete_file(urlparse(post.url).path.lstrip('/'))
+
+        g.db.add(post)
+
+        if not i%100:
+            g.db.commit()
+
+
+    g.db.commit()
+
+    return redirect(board.permalink)
+
+@app.route("/admin/image_ban", methods=["POST"])
+@admin_level_required(4)
+@validate_formkey
+def admin_image_ban(v):
+
+    i=request.files['file']
+
+
+    #make phash
+    tempname = f"admin_image_ban_{v.username}_{int(time.time())}"
+
+    i.save(tempname)
+
+    h=imagehash.phash(IMAGE.open(tempname))
+    h=hex2bin(str(h))
+
+    #check db for existing
+    badpic = g.db.query(BadPic).filter_by(
+        phash=h
+        ).first()
+
+    remove(tempname)
+
+    if badpic:
+        return render_template("admin/image_ban.html", v=v, existing=badpic)
+
+    new_bp=BadPic(
+        phash=h,
+        ban_reason=request.form.get("ban_reason"),
+        ban_time=int(request.form.get("ban_length",0))
+        )
+
+    g.db.add(new_bp)
+    g.db.commit()
+
+    return render_template("admin/image_ban.html", v=v, success=True)

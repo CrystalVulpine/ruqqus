@@ -6,6 +6,7 @@ from werkzeug.contrib.atom import AtomFeed
 from datetime import datetime
 import secrets
 import threading
+from os import environ
 
 from ruqqus.helpers.wrappers import *
 from ruqqus.helpers.base36 import *
@@ -22,7 +23,7 @@ from flask import *
 from ruqqus.__main__ import app, limiter
 
 
-BUCKET="i.ruqqus.com"
+BUCKET=app.config["S3_BUCKET"]
 
 
 @app.route("/comment/<cid>", methods=["GET"])
@@ -31,6 +32,11 @@ BUCKET="i.ruqqus.com"
 @app.route("/post_short/<pid>/<cid>/", methods=["GET"])
 def comment_cid(cid, pid=None):
 
+    try:
+        x=base36decode(cid)
+    except:
+        abort(400)
+        
     comment = get_comment(cid)
     if not comment.parent_submission:
         abort(403)
@@ -42,6 +48,7 @@ def comment_cid_api_redirect(c_id=None, p_id=None):
 
 @app.route("/api/v1/comment/<c_id>", methods=["GET"])
 @app.route("/+<boardname>/post/<p_id>/<anything>/<c_id>", methods=["GET"])
+@app.route("/api/vue/comment/<c_id>")
 @auth_desired
 @api("read")
 def post_pid_comment_cid(c_id, p_id=None, boardname=None, anything=None, v=None):
@@ -127,20 +134,30 @@ def post_pid_comment_cid(c_id, p_id=None, boardname=None, anything=None, v=None)
 
     sort_type = request.args.get("sort", "hot")
     # children comments
+
     current_ids = [comment.id]
+
+    exile=g.db.query(ModAction
+        ).filter_by(
+        kind="exile_user"
+        ).distinct(ModAction.target_comment_id).subquery()
+
     for i in range(6 - context):
         if v:
+
             votes = g.db.query(CommentVote).filter(
                 CommentVote.user_id == v.id).subquery()
 
             blocking = v.blocking.subquery()
             blocked = v.blocked.subquery()
 
+
             comms = g.db.query(
                 Comment,
                 votes.c.vote_type,
                 blocking.c.id,
-                blocked.c.id
+                blocked.c.id,
+                aliased(ModAction, alias=exile)
             ).select_from(Comment).options(
                 joinedload(Comment.author).joinedload(User.title)
             ).filter(
@@ -156,6 +173,10 @@ def post_pid_comment_cid(c_id, p_id=None, boardname=None, anything=None, v=None)
             ).join(
                 blocked,
                 blocked.c.user_id == Comment.author_id,
+                isouter=True
+            ).join(
+                exile,
+                exile.c.target_comment_id==Comment.id,
                 isouter=True
             )
 
@@ -179,15 +200,22 @@ def post_pid_comment_cid(c_id, p_id=None, boardname=None, anything=None, v=None)
                 comment._voted = c[1] or 0
                 comment._is_blocking = c[2] or 0
                 comment._is_blocked = c[3] or 0
+                comment._is_guildmaster=top_comment._is_guildmaster
+                comment._is_exiled_for=c[4] or 0
                 output.append(comment)
         else:
 
             comms = g.db.query(
-                Comment
+                Comment,
+                aliased(ModAction, alias=exile)
             ).options(
                 joinedload(Comment.author).joinedload(User.title)
             ).filter(
                 Comment.parent_comment_id.in_(current_ids)
+            ).join(
+                exile,
+                exile.c.target_comment_id==Comment.id,
+                isouter=True
             )
 
             if sort_type == "hot":
@@ -204,11 +232,20 @@ def post_pid_comment_cid(c_id, p_id=None, boardname=None, anything=None, v=None)
             else:
                 abort(422)
 
-            output = [c for c in comms]
+            output = []
+            for c in comms:
+                comment=c[0]
+                comment._is_exiled_for=c[1] or 0
+                output.append(comment)
 
         post._preloaded_comments += output
 
         current_ids = [x.id for x in output]
+
+
+    post.tree_comments()
+
+    post.replies=[top_comment]
 
     return {'html': lambda: post.rendered_page(v=v, comment=top_comment, comment_info=comment_info),
             'api': lambda: top_comment.json
@@ -260,6 +297,10 @@ def api_comment(v):
     body = request.form.get("body", "")[0:10000]
     body = body.lstrip().rstrip()
 
+    if not body and not (v.has_premium and request.files.get('file')):
+        return jsonify({"error":"You need to actually write something!"}), 400
+    
+    body=preprocess(body)
     with CustomRenderer(post_id=parent_id) as renderer:
         body_md = renderer.render(mistletoe.Document(body))
     body_html = sanitize(body_md, linkgen=True)
@@ -272,11 +313,17 @@ def api_comment(v):
         reason = f"Remove the {ban.domain} link from your comment and try again."
         if ban.reason:
             reason += f" {ban.reason_text}"
+            
+        #auto ban for digitally malicious content
+        if any([x.reason==4 for x in bans]):
+            v.ban(days=30, reason="Digitally malicious content")
+        if any([x.reason==7 for x in bans]):
+            v.ban( reason="Sexualizing minors")
         return jsonify({"error": reason}), 401
 
     # check existing
     existing = g.db.query(Comment).join(CommentAux).filter(Comment.author_id == v.id,
-                                                           Comment.is_deleted == False,
+                                                           Comment.deleted_utc == 0,
                                                            Comment.parent_comment_id == parent_comment_id,
                                                            Comment.parent_submission == parent_submission,
                                                            CommentAux.body == body
@@ -285,17 +332,18 @@ def api_comment(v):
         return jsonify({"error": f"You already made that comment: {existing.permalink}"}), 409
 
     # No commenting on deleted/removed things
-    if parent.is_banned or parent.is_deleted:
+    if parent.is_banned or parent.deleted_utc > 0:
         return jsonify(
             {"error": "You can't comment on things that have been deleted."}), 403
 
-    if parent.author.any_block_exists(v):
+    if parent.author.any_block_exists(v) and not v.admin_level>=3 and not parent.post.board.has_mod(v, "content"):
         return jsonify(
             {"error": "You can't reply to users who have blocked you, or users you have blocked."}), 403
 
     # check for archive and ban state
     post = get_post(parent_id)
     if post.is_archived or not post.board.can_comment(v):
+
         return jsonify({"error": "You can't comment on this."}), 403
 
     # get bot status
@@ -313,14 +361,12 @@ def api_comment(v):
                ).filter(
             Comment.author_id == v.id,
             CommentAux.body.op(
-                '<->')(body) < app.config["SPAM_SIMILARITY_THRESHOLD"],
+                '<->')(body) < app.config["COMMENT_SPAM_SIMILAR_THRESHOLD"],
             Comment.created_utc > cutoff
         ).options(contains_eager(Comment.comment_aux)).all()
 
-        threshold = app.config["SPAM_SIMILAR_COUNT_THRESHOLD"]
-        if v.age >= (60 * 60 * 24 * 30):
-            threshold *= 4
-        elif v.age >= (60 * 60 * 24 * 7):
+        threshold = app.config["COMMENT_SPAM_COUNT_THRESHOLD"]
+        if v.age >= (60 * 60 * 24 * 7):
             threshold *= 3
         elif v.age >= (60 * 60 * 24):
             threshold *= 2
@@ -333,12 +379,21 @@ def api_comment(v):
                   days=1)
 
             for alt in v.alts:
-                alt.ban(reason="Spamming.", days=1)
+                if not alt.is_suspended:
+                    alt.ban(reason="Spamming.", days=1)
 
             for comment in similar_comments:
                 comment.is_banned = True
                 comment.ban_reason = "Automatic spam removal. This happened because the post's creator submitted too much similar content too quickly."
                 g.db.add(comment)
+                ma=ModAction(
+                    user_id=1,
+                    target_comment_id=comment.id,
+                    kind="ban_comment",
+                    board_id=comment.post.board_id,
+                    note="spam"
+                    )
+                g.db.add(ma)
 
             g.db.commit()
             return jsonify({"error": "Too much spam!"}), 403
@@ -383,15 +438,16 @@ def api_comment(v):
                 level=level,
                 over_18=post.over_18,
                 is_nsfl=post.is_nsfl,
-                is_op=(v.id == post.author_id),
                 is_offensive=is_offensive,
                 original_board_id=parent_post.board_id,
                 is_bot=is_bot,
-                app_id=v.client.application.id if v.client else None
+                app_id=v.client.application.id if v.client else None,
+                creation_region=request.headers.get("cf-ipcountry")
                 )
 
     g.db.add(c)
     g.db.flush()
+
 
     if v.has_premium:
         if request.files.get("file"):
@@ -403,7 +459,7 @@ def api_comment(v):
             upload_file(name, file)
 
             body = request.form.get("body") + f"\n\n![](https://{BUCKET}/{name})"
-
+            body=preprocess(body)
             with CustomRenderer(post_id=parent_id) as renderer:
                 body_md = renderer.render(mistletoe.Document(body))
             body_html = sanitize(body_md, linkgen=True)
@@ -430,6 +486,7 @@ def api_comment(v):
         body_html=body_html,
         body=body
     )
+
     g.db.add(c_aux)
     g.db.flush()
 
@@ -458,6 +515,7 @@ def api_comment(v):
                          user_id=x)
         g.db.add(n)
 
+
     # create auto upvote
     vote = CommentVote(user_id=v.id,
                        comment_id=c.id,
@@ -471,7 +529,11 @@ def api_comment(v):
 
     g.db.commit()
 
+    c=get_comment(c.id, v=v)
+
+
     # print(f"Content Event: @{v.username} comment {c.base36id}")
+
 
     return {"html": lambda: jsonify({"html": render_template("comments.html",
                                                              v=v,
@@ -481,6 +543,7 @@ def api_comment(v):
                                                              )}),
             "api": lambda: c.json
             }
+
 
 
 @app.route("/edit_comment/<cid>", methods=["POST"])
@@ -494,13 +557,14 @@ def edit_comment(cid, v):
     if not c.author_id == v.id:
         abort(403)
 
-    if c.is_banned or c.is_deleted:
+    if c.is_banned or c.deleted_utc > 0:
         abort(403)
 
     if c.board.has_ban(v):
         abort(403)
 
     body = request.form.get("body", "")[0:10000]
+    body=preprocess(body)
     with CustomRenderer(post_id=c.post.base36id) as renderer:
         body_md = renderer.render(mistletoe.Document(body))
     body_html = sanitize(body_md, linkgen=True)
@@ -509,6 +573,20 @@ def edit_comment(cid, v):
     bans = filter_comment_html(body_html)
 
     if bans:
+        
+        ban = bans[0]
+        reason = f"Remove the {ban.domain} link from your comment and try again."
+
+        #auto ban for digitally malicious content
+        if any([x.reason==4 for x in bans]):
+            v.ban(days=30, reason="Digitally malicious content is not allowed.")
+            return jsonify({"error":"Digitally malicious content is not allowed."})
+        
+        if ban.reason:
+            reason += f" {ban.reason_text}"    
+          
+        return jsonify({"error": reason}), 401
+    
         return {'html': lambda: render_template("comment_failed.html",
                                                 action=f"/edit_comment/{c.base36id}",
                                                 badlinks=[
@@ -523,6 +601,7 @@ def edit_comment(cid, v):
         if x.check(body):
             c.is_offensive = True
             break
+
         else:
             c.is_offensive = False
 
@@ -588,6 +667,7 @@ def edit_comment(cid, v):
 
     c.body = body
     c.body_html = body_html
+
     c.edited_utc = int(time.time())
 
     g.db.add(c)
@@ -614,9 +694,10 @@ def delete_comment(cid, v):
     if not c.author_id == v.id:
         abort(403)
 
-    c.is_deleted = True
+    c.deleted_utc = int(time.time())
 
     g.db.add(c)
+
 
     cache.delete_memoized(User.commentlisting, v)
 
@@ -635,7 +716,7 @@ def embed_comment_cid(cid, pid=None):
     if not comment.parent:
         abort(403)
 
-    if comment.is_banned or comment.is_deleted:
+    if comment.is_banned or comment.deleted_utc > 0:
         return {'html': lambda: render_template("embeds/comment_removed.html", c=comment),
                 'api': lambda: {'error': f'Comment {cid} has been removed'}
                 }
@@ -645,24 +726,19 @@ def embed_comment_cid(cid, pid=None):
 
     return render_template("embeds/comment.html", c=comment)
 
-@app.route("/mod/comment_pin/<bid>/<cid>/<x>", methods=["POST"])
+@app.route("/mod/comment_pin/<bid>/<cid>", methods=["POST"])
 @auth_required
-@is_guildmaster
+@is_guildmaster("content")
 @validate_formkey
-def mod_toggle_comment_pin(bid, cid, x, board, v):
+def mod_toggle_comment_pin(bid, cid, board, v):
 
-    comment = get_comment(cid)
+    comment = get_comment(cid, v=v)
 
     if comment.post.board_id != board.id:
         abort(400)
-
-    try:
-        x = bool(int(x))
-    except BaseException:
-        abort(400)
         
     #remove previous pin (if exists)
-    if x:
+    if not comment.is_pinned:
         previous_sticky = g.db.query(Comment).filter(
             and_(
                 Comment.parent_submission == comment.post.id, 
@@ -673,19 +749,25 @@ def mod_toggle_comment_pin(bid, cid, x, board, v):
             previous_sticky.is_pinned = False
             g.db.add(previous_sticky)
 
-    comment.is_pinned = x
+    comment.is_pinned = not comment.is_pinned
 
     g.db.add(comment)
+    ma=ModAction(
+        kind="pin_comment" if comment.is_pinned else "unpin_comment",
+        user_id=v.id,
+        board_id=board.id,
+        target_comment_id=comment.id
+    )
+    g.db.add(ma)
 
-    return "", 204
+    html=render_template(
+                "comments.html",
+                v=v,
+                comments=[comment],
+                render_replies=False,
+                is_allowed_to_comment=True
+                )
 
-@app.route("/api/v1/post/<pid>/comments")
-@auth_desired
-@api("read")
-def api_v1_post_pid_comment(pid, v):
+    html=str(BeautifulSoup(html, features="html.parser").find(id=f"comment-{comment.base36id}-only"))
 
-    post=get_post_with_comments(pid, v=v)
-
-    post.tree_comments()
-
-    return jsonify(post.json)
+    return jsonify({"html":html})

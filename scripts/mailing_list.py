@@ -22,7 +22,10 @@ x = db.query(classes.user.User).filter(
 total=x.count()
 print(f"total mail to send: {total}")
 
+
 i=0
+unable=0
+success=0
 for user in x.order_by(classes.user.User.id.asc()).all():
 #for user in [get_user('captainmeta4', nSession=db)]:
     i+=1
@@ -41,8 +44,14 @@ for user in x.order_by(classes.user.User.id.asc()).all():
             subject=subject,
             html=html
         )
+
         print(f"{i}/{total} [{user.id}] @{user.username}")
+        success+=1
     except BaseException:
         print(f"{i}/{total} unable - [{user.id}] @{user.username}")
+        unable+=1
 
 print("all done")
+print(f"attempt - {total}")
+print(f"success - {success}")
+print(f"failure - {unable}")

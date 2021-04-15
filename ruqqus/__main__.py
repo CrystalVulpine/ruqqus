@@ -1,8 +1,11 @@
 import gevent.monkey
 gevent.monkey.patch_all()
 
+#import eventlet
+#eventlet.monkey_patch()
+
 #import psycogreen.gevent
-# psycogreen.gevent.patch_psycopg()
+#psycogreen.gevent.patch_psycopg()
 
 from os import environ
 import secrets
@@ -11,7 +14,9 @@ from flask_caching import Cache
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_compress import Compress
+from flask_socketio import SocketIO
 from time import sleep
+from collections import deque
 
 from flaskext.markdown import Markdown
 from sqlalchemy.ext.declarative import declarative_base
@@ -22,20 +27,24 @@ from sqlalchemy.pool import QueuePool
 import threading
 import requests
 import random
+import redis
+import gevent
 
 from redis import BlockingConnectionPool
 
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 
-_version = "2.26.5"
+_version = "2.35.62"
 
 app = Flask(__name__,
             template_folder='./templates',
             static_folder='./static'
             )
-app.wsgi_app = ProxyFix(app.wsgi_app, num_proxies=2)
+app.wsgi_app = ProxyFix(app.wsgi_app, num_proxies=3)
 app.url_map.strict_slashes = False
+
+app.config["SITE_NAME"]=environ.get("SITE_NAME", "ruqqus").lstrip().rstrip()
 
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['DATABASE_URL'] = environ.get(
@@ -51,7 +60,7 @@ app.config['SQLALCHEMY_READ_URIS'] = [
 app.config['SECRET_KEY'] = environ.get('MASTER_KEY')
 app.config["SERVER_NAME"] = environ.get(
     "domain", environ.get(
-        "SERVER_NAME", None)).rstrip()
+        "SERVER_NAME", "")).lstrip().rstrip()
 app.config["SESSION_COOKIE_NAME"] = "session_ruqqus"
 app.config["VERSION"] = _version
 app.config['MAX_CONTENT_LENGTH'] = 64 * 1024 * 1024
@@ -59,25 +68,27 @@ app.config["SESSION_COOKIE_SECURE"] = bool(int(environ.get("FORCE_HTTPS", 1)))
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 app.config["PERMANENT_SESSION_LIFETIME"] = 60 * 60 * 24 * 365
-app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+app.config["SESSION_REFRESH_EACH_REQUEST"] = True
 
 app.config["FORCE_HTTPS"] = int(environ.get("FORCE_HTTPS", 1))
+app.config["DISABLE_SIGNUPS"]=int(environ.get("DISABLE_SIGNUPS",0))
 
 app.jinja_env.cache = {}
 
-app.config["UserAgent"] = f"Ruqqus title finder tool for Ruqqus v{_version} developed by Ruqqus LLC for ruqqus.com."
+app.config["UserAgent"] = f"Content Aquisition for Porpl message board v{_version}."
 
 if "localhost" in app.config["SERVER_NAME"]:
     app.config["CACHE_TYPE"] = "null"
 else:
-    app.config["CACHE_TYPE"] = environ.get("CACHE_TYPE", 'filesystem')
+    app.config["CACHE_TYPE"] = environ.get("CACHE_TYPE", 'filesystem').lstrip().rstrip()
 
 app.config["CACHE_DIR"] = environ.get("CACHE_DIR", "ruqquscache")
 
 # captcha configs
-app.config["HCAPTCHA_SITEKEY"] = environ.get("HCAPTCHA_SITEKEY")
+app.config["HCAPTCHA_SITEKEY"] = environ.get("HCAPTCHA_SITEKEY","").lstrip().rstrip()
 app.config["HCAPTCHA_SECRET"] = environ.get(
-    "HCAPTCHA_SECRET").lstrip().rstrip()
+    "HCAPTCHA_SECRET","").lstrip().rstrip()
+app.config["SIGNUP_HOURLY_LIMIT"]=int(environ.get("SIGNUP_HOURLY_LIMIT",0))
 
 # antispam configs
 app.config["SPAM_SIMILARITY_THRESHOLD"] = float(
@@ -86,11 +97,17 @@ app.config["SPAM_SIMILAR_COUNT_THRESHOLD"] = int(
     environ.get("SPAM_SIMILAR_COUNT_THRESHOLD", 5))
 app.config["SPAM_URL_SIMILARITY_THRESHOLD"] = float(
     environ.get("SPAM_URL_SIMILARITY_THRESHOLD", 0.1))
+app.config["COMMENT_SPAM_SIMILAR_THRESHOLD"] = float(
+    environ.get("COMMENT_SPAM_SIMILAR_THRESHOLD", 0.5))
+app.config["COMMENT_SPAM_COUNT_THRESHOLD"] = int(
+    environ.get("COMMENT_SPAM_COUNT_THRESHOLD", 5))
 
 app.config["CACHE_REDIS_URL"] = environ.get(
-    "REDIS_URL").rstrip() if environ.get("REDIS_URL") else None
+    "REDIS_URL").rstrip().lstrip() if environ.get("REDIS_URL") else None
 app.config["CACHE_DEFAULT_TIMEOUT"] = 60
 app.config["CACHE_KEY_PREFIX"] = "flask_caching_"
+
+app.config["S3_BUCKET"]=environ.get("S3_BUCKET_NAME","i.ruqqus.com").lstrip().rstrip()
 
 #app.config["REDIS_POOL_SIZE"]=int(environ.get("REDIS_POOL_SIZE", 30))
 
@@ -98,23 +115,42 @@ app.config["CACHE_KEY_PREFIX"] = "flask_caching_"
 # app.config["CACHE_OPTIONS"]={'connection_pool':redispool}
 
 
-# setup env vars - convenience statement
-
-for x in ["DATABASE_URL", "SECRET_KEY"]:
-    if not app.config.get(x):
-        raise RuntimeError(f"The following environment variable must be defined: {x}")
-
-
 Markdown(app)
 cache = Cache(app)
 Compress(app)
 
+class CorsMatch(str):
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            if other==f'https://{app.config["SERVER_NAME"]}':
+                return True
+
+            elif other.endswith(".ruqqus.com"):
+                return True
+
+        elif isinstance(other, list):
+            if f'https://{app.config["SERVER_NAME"]}' in other:
+                return True
+            elif any([x.endswith(".ruqqus.com") for x in other]):
+                return True
+
+        return False
+
+socketio=SocketIO(
+	app,
+	cors_allowed_origins=CorsMatch()
+	#message_queue=environ.get("REDIS_CHAT_URL")
+	)
+
 
 # app.config["CACHE_REDIS_URL"]
-app.config["RATELIMIT_STORAGE_URL"] = 'memory://'
+app.config["RATELIMIT_STORAGE_URL"] = environ.get("REDIS_URL").lstrip().rstrip() if environ.get("REDIS_URL") else 'memory://'
 app.config["RATELIMIT_KEY_PREFIX"] = "flask_limiting_"
-app.config["RATELIMIT_ENABLED"] = bool(
-    int(environ.get("RATELIMIT_ENABLED", True)))
+app.config["RATELIMIT_ENABLED"] = True
+app.config["RATELIMIT_DEFAULTS_DEDUCT_WHEN"]=lambda:True
+app.config["RATELIMIT_DEFAULTS_EXEMPT_WHEN"]=lambda:False
+app.config["RATELIMIT_HEADERS_ENABLED"]=True
 
 
 def limiter_key_func():
@@ -192,10 +228,14 @@ db_session = scoped_session(sessionmaker(class_=RoutingSession, query_cls=Retryi
 
 Base = declarative_base()
 
-# import and bind all routing functions
-import ruqqus.classes
-from ruqqus.routes import *
-import ruqqus.helpers.jinja2
+
+#set the shared redis cache for misc stuff
+
+r=redis.Redis(host=app.config["CACHE_REDIS_URL"][8:], decode_responses=True, ssl_cert_reqs=None)
+
+
+#import and bind chat function
+from ruqqus.chat import *
 
 
 @app.before_first_request
@@ -207,14 +247,21 @@ def app_setup():
 IP_BAN_CACHE_TTL = int(environ.get("IP_BAN_CACHE_TTL", 3600))
 UA_BAN_CACHE_TTL = int(environ.get("UA_BAN_CACHE_TTL", 3600))
 
+local_ban_cache={}
 
-@cache.memoize(IP_BAN_CACHE_TTL)
+
+#@cache.memoize(IP_BAN_CACHE_TTL)
 def is_ip_banned(remote_addr):
     """
     Given a remote address, returns whether or not user is banned
     """
-    return bool(g.db.query(ruqqus.classes.IP).filter_by(
-        addr=remote_addr).count())
+
+    return bool(r.get(f"ban_ip_{remote_addr}"))
+
+# import and bind all routing functions
+import ruqqus.classes
+from ruqqus.routes import *
+import ruqqus.helpers.jinja2
 
 
 @cache.memoize(UA_BAN_CACHE_TTL)
@@ -237,12 +284,23 @@ def get_useragent_ban_response(user_agent_str):
 @app.before_request
 def before_request():
 
+    g.timestamp = int(time.time())
+
+    if is_ip_banned(request.remote_addr):
+        try:
+            print("banned ip", request.remote_addr, session.get("user_id"), session.get("history"))
+        except:
+            pass
+
+        #offensively hold request open for 60s while ignoring user and doing other,
+        #more useful things
+        #gevent.sleep(60)
+        return "", 429
+        #gevent.getcurrent().kill()
+
     g.db = db_session()
 
     session.permanent = True
-
-    if is_ip_banned(request.remote_addr):
-        return "", 403
 
     ua_banned, response_tuple = get_useragent_ban_response(
         request.headers.get("User-Agent", "NoAgent"))
@@ -257,7 +315,20 @@ def before_request():
     if not session.get("session_id"):
         session["session_id"] = secrets.token_hex(16)
 
-    g.timestamp = int(time.time())
+    ua=request.headers.get("User-Agent","")
+    if "CriOS/" in ua:
+        g.system="ios/chrome"
+    elif "Version/" in ua:
+        g.system="android/webview"
+    elif "Mobile Safari/" in ua:
+        g.system="android/chrome"
+    elif "Safari/" in ua:
+        g.system="ios/safari"
+    elif "Mobile/" in ua:
+        g.system="ios/webview"
+    else:
+        g.system="other/other"
+
 
     # g.db.begin_nested()
 
@@ -300,21 +371,32 @@ def after_request(response):
     response.headers.add("Referrer-Policy", "same-origin")
     # response.headers.add("X-Content-Type-Options","nosniff")
     response.headers.add("Feature-Policy",
-                         "geolocation 'none'; midi 'none'; notifications 'none'; push 'none'; sync-xhr 'none'; microphone 'none'; camera 'none'; magnetometer 'none'; gyroscope 'none'; speaker 'none'; vibrate 'none'; fullscreen 'none'; payment")
+                         "geolocation 'none'; midi 'none'; notifications 'none'; push 'none'; sync-xhr 'none'; microphone 'none'; camera 'none'; magnetometer 'none'; gyroscope 'none'; vibrate 'none'; fullscreen 'none'; payment 'none';")
     if not request.path.startswith("/embed/"):
         response.headers.add("X-Frame-Options",
                              "deny")
 
     # signups - hit discord webhook
-    if request.method == "POST" and response.status_code in [
-            301, 302] and request.path == "/signup":
-        link = f'https://{app.config["SERVER_NAME"]}/@{request.form.get("username")}'
-        thread = threading.Thread(
-            target=lambda: log_event(
-                name="Account Signup", link=link))
-        thread.start()
+    # if request.method == "POST" and response.status_code in [
+    #         301, 302] and request.path == "/signup":
+    #     link = f'https://{app.config["SERVER_NAME"]}/@{request.form.get("username")}'
+    #     thread = threading.Thread(
+    #         target=lambda: log_event(
+    #             name="Account Signup", link=link))
+    #     thread.start()
 
-    g.db.close()
+    try:
+        g.db.close()
+    except AttributeError:
+        pass
+
+    # req_stop = time.time()
+
+    # try:
+    #     req_time=req_stop - g.timestamp
+    #     site_performance(req_time)
+    # except AttributeError:
+    #     pass
 
     return response
 
@@ -322,9 +404,4 @@ def after_request(response):
 @app.route("/<path:path>", subdomain="www")
 def www_redirect(path):
 
-    return redirect(f"https://ruqqus.com/{path}")
-
-# @app.teardown_appcontext
-# def teardown(resp):
-
-#     g.db.close()
+    return redirect(f"https://{app.config['SERVER_NAME']}/{path}")
