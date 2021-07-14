@@ -80,6 +80,41 @@ As an open-source project, we are supported by the community. If you would like 
 
 **PIVX** - `DSgD6hxu1EgRiULn6RNbnv5tRvij5BGtUa`
 
+## Stay in touch
+
+- [Twitter](https://twitter.com/ruqqus)
+- [Discord](https://ruqqus.com/discord)
+- [Twitch.tv](https://twitch.tv/captainmeta4)
+
+## Local development
+
+### Docker Deployment
+
+In order to build your docs, you need to add the following to your hosts file:
+
+```
+127.0.0.1    ruqqus.localhost
+```
+Before deploying, make sure to compile .scss files in `ruqqus/assets/style/` with a package called "sass" (or ruby-sass)
+
+To deploy the stack with docker, simply use:
+
+```
+docker-compose up
+```
+
+The database will automatically be seeded with an administrator account; user `ruqqie` and password `password`.
+
+### Mac
+
+Install dependencies
+
+`$ pip3 install -r requirements.txt`
+
+`$ brew install redis`
+
+`$ brew install postgres`
+
 
 
 
@@ -100,6 +135,10 @@ Upon installation, trying to submit a post will cause a 404 error. You have to c
 
 Note: When trying to run Ruqqus locally, make sure to use a [tagged release version](https://github.com/ruqqus/ruqqus/releases). The reason this is necessary is that the file schema.txt is not always updated, which will cause Ruqqus to crash. If after first setting up Ruqqus you are getting a 500/Internal Server Error on pages because of database errors, this is most likely why.
 
+## API
+
+Community-made docs for the Ruqqus API can be found here:
+https://ruqqus-api.stoplight.io
 
 ## License
 [MPL-2.0](https://github.com/ruqqus/ruqqus/blob/master/LICENSE)

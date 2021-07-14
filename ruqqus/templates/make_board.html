@@ -5,7 +5,7 @@
 {% endblock %}
 
 {% block pagetitle %}Create a Guild{% endblock %}
-{% block subtitle %}Launch your own guild on Ruqqus{% endblock %}
+{% block subtitle %}Launch your own guild on {{ 'SITE_NAME' | app_config }}{% endblock %}
 {% block sidebar %}{% endblock %}
 {% block stylesheets %}
 
@@ -51,6 +51,20 @@
                             <small class="format"><i class="fas fa-quote-right"></i></small>
                             <small class="format"><i class="fas fa-link"></i></small>
                         </div>
+                    </div>
+
+                    <label for="select-category">Select Category</label>
+                    <div class="input-group">
+                      <select id="category-selector" name="category" class="form-control" >
+                        <option value="0" selected disabled>Select a Category</option>
+                        {% for category in categories %}
+                            <option disabled>{{ category.name }}</option>
+
+                            {% for subcat in category.subcats %}
+                              <option value="{{ subcat.id }}"> - {{ subcat.name }}</option>
+                            {% endfor %}
+                        {% endfor %}
+                      </select>
                     </div>
 
                     <label for="over_18" class="text-danger mt-3">NSFW?</label>
@@ -99,7 +113,7 @@
                                 </a>
                             </li>
                             <div id="ruleCollapse2" class="collapse">
-                                <p style="padding: 0 0 0 22px;">Do not harass or threaten others on Ruqqus. You are not allowed to share or publish personal information, either yours or another person.</p>
+                                <p style="padding: 0 0 0 22px;">Do not harass or threaten others on {{ 'SITE_NAME' | app_config }}. You are not allowed to share or publish personal information, either yours or another person.</p>
                             </div>
                             <li>
                                 <a class="text-black font-weight-bold collapsed" data-toggle="collapse" href="#ruleCollapse3" role="button" aria-expanded="false" aria-controls="ruleCollapse3">No inciting violence<span class="float-right"><i class="fa"></i></span>
@@ -125,7 +139,7 @@
                         <li class="list-inline-item"><a href="https://github.com/ruqqus/ruqqus" class="text-gray-500">Github</a></li>
                         <li class="list-inline-item"><a href="/discord" class="text-gray-500">Discord</a></li>
                     </ul>
-                    <div class="text-muted text-small-extra mt-1">v. 2.5.0, © 2020 Ruqqus, LLC</div>
+                    <div class="text-muted text-small-extra mt-1">v. 2.29.9.9, © 2021 Ruqqus, LLC</div>
                 </div>
 
             </div>

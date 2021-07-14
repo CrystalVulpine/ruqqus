@@ -3,13 +3,18 @@ from os import environ
 import requests
 from werkzeug.wrappers.response import Response as RespObj
 import time
+import random
 
 from ruqqus.classes import *
 from .get import *
-from ruqqus.__main__ import Base, app
+from .alerts import send_notification
+from ruqqus.__main__ import Base, app, db_session
 
 
-def get_logged_in_user():
+def get_logged_in_user(db=None):
+
+    if not db:
+        db=g.db
 
     if request.path.startswith("/api/v1"):
 
@@ -36,15 +41,12 @@ def get_logged_in_user():
         if not token:
             return None, None
 
-        client = g.db.query(ClientAuth).filter(
+        client = db.query(ClientAuth).filter(
             ClientAuth.access_token == token,
             ClientAuth.access_token_expire_utc > int(time.time())
         ).first()
 
-        if app.config["SERVER_NAME"]=="dev.ruqqus.com" and client.user.admin_level < 2 and not client.user.has_premium:
-            x=(None, None)
-        else:
-            x = (client.user, client) if client else (None, None)
+        x = (client.user, client) if client else (None, None)
 
 
     elif "user_id" in session:
@@ -53,16 +55,16 @@ def get_logged_in_user():
         nonce = session.get("login_nonce", 0)
         if not uid:
             x= (None, None)
-        v = g.db.query(User).options(
+        v = db.query(User).options(
             joinedload(User.moderates).joinedload(ModRelationship.board), #joinedload(Board.reports),
             joinedload(User.subscriptions).joinedload(Subscription.board)
         #    joinedload(User.notifications)
-            ).filter_by(id=uid).first()
+            ).filter_by(
+            id=uid,
+            is_deleted=False
+            ).first()
 
-        if app.config["SERVER_NAME"]=="dev.ruqqus.com" and v.admin_level < 2 and not v.has_premium:
-            x= (None, None)
-
-        if v and nonce < v.login_nonce:
+        if v and (nonce < v.login_nonce):
             x= (None, None)
         else:
             x=(v, None)
@@ -75,6 +77,62 @@ def get_logged_in_user():
 
     return x
 
+def check_ban_evade(v):
+
+    if not v or not v.ban_evade:
+        return
+    
+    if random.randint(0,30) < v.ban_evade:
+        v.ban(reason="Evading a site-wide ban")
+        send_notification(v, "Your Ruqqus account has been permanently suspended for the following reason:\n\n> ban evasion")
+
+        for post in g.db.query(Submission).filter_by(author_id=v.id).all():
+            if post.is_banned:
+                continue
+
+            post.is_banned=True
+            post.ban_reason="Ban evasion. This submission's owner was banned from Ruqqus on another account."
+            g.db.add(post)
+
+            ma=ModAction(
+                kind="ban_post",
+                user_id=1,
+                target_submission_id=post.id,
+                board_id=post.board_id,
+                note="ban evasion"
+                )
+            g.db.add(ma)
+
+        g.db.commit()
+
+        for comment in g.db.query(Comment).filter_by(author_id=v.id).all():
+            if comment.is_banned:
+                continue
+
+            comment.is_banned=True
+            comment.ban_reason="Ban evasion. This comment's owner was banned from Ruqqus on another account."
+            g.db.add(comment)
+
+            ma=ModAction(
+                kind="ban_comment",
+                user_id=1,
+                target_comment_id=comment.id,
+                board_id=comment.post.board_id,
+                note="ban evasion"
+                )
+            g.db.add(ma)
+
+        g.db.commit()
+        abort(403)
+
+    else:
+        v.ban_evade +=1
+        g.db.add(v)
+        g.db.commit()
+
+
+
+
 # Wrappers
 def auth_desired(f):
     # decorator for any view that changes if user is logged in (most pages)
@@ -85,6 +143,10 @@ def auth_desired(f):
 
         if c:
             kwargs["c"] = c
+            
+        check_ban_evade(v)
+        
+        g.v=v
 
         resp = make_response(f(*args, v=v, **kwargs))
         if v:
@@ -111,6 +173,8 @@ def auth_required(f):
 
         if not v:
             abort(401)
+            
+        check_ban_evade(v)
 
         if c:
             kwargs["c"] = c
@@ -141,6 +205,8 @@ def is_not_banned(f):
 
         if not v:
             abort(401)
+            
+        check_ban_evade(v)
 
         if v.is_suspended:
             abort(403)
@@ -223,35 +289,49 @@ def no_negative_balance(s):
 
     return wrapper_maker
 
-def is_guildmaster(f):
-    # decorator that enforces guildmaster status
+def is_guildmaster(*perms):
+    # decorator that enforces guildmaster status and verifies permissions
     # use under auth_required
+    def wrapper_maker(f):
 
-    def wrapper(*args, **kwargs):
+        def wrapper(*args, **kwargs):
 
-        v = kwargs["v"]
-        boardname = kwargs.get("boardname")
-        board_id = kwargs.get("bid")
+            v = kwargs["v"]
+            boardname = kwargs.get("boardname")
+            board_id = kwargs.get("bid")
+            bid=request.values.get("bid", request.values.get("board_id"))
 
-        if boardname:
-            board = get_guild(boardname)
-        else:
-            board = get_board(board_id)
+            if boardname:
+                board = get_guild(boardname)
+            elif board_id:
+                board = get_board(board_id)
+            elif bid:
+                board = get_board(bid)
+            else:
+                return jsonify({"error": f"no guild specified"}), 400
 
-        if not board.has_mod(v):
-            abort(403)
+            m=board.has_mod(v)
+            if not m:
+                return jsonify({"error":f"You aren't a guildmaster of +{board.name}"}), 403
 
-        if v.is_banned and not v.unban_utc:
-            abort(403)
+            if perms:
+                for perm in perms:
+                    if not m.__dict__.get(f"perm_{perm}") and not m.perm_full:
+                        return jsonify({"error":f"Permission `{perm}` required"}), 403
 
-        return f(*args, board=board, **kwargs)
 
-    wrapper.__name__ = f.__name__
-    return wrapper
+            if v.is_banned and not v.unban_utc:
+                abort(403)
+
+            return f(*args, board=board, **kwargs)
+
+        wrapper.__name__ = f.__name__
+        return wrapper
+
+    return wrapper_maker
+
 
 # this wrapper takes args and is a bit more complicated
-
-
 def admin_level_required(x):
 
     def wrapper_maker(f):
@@ -349,7 +429,7 @@ def api(*scopes, no_ban=False):
 
         def wrapper(*args, **kwargs):
 
-            if request.path.startswith('/api/v1'):
+            if request.path.startswith(('/api/v1','/api/v2')):
 
                 v = kwargs.get('v')
                 client = kwargs.get('c')
@@ -392,15 +472,45 @@ def api(*scopes, no_ban=False):
 
                 result = f(*args, **kwargs)
 
-                if isinstance(result, RespObj) or isinstance(result, tuple):
+                if not isinstance(result, dict):
                     return result
 
-                if request.path.startswith('/inpage/'):
-                    return result['inpage']()
-                else:
-                    return result['html']()
+                try:
+                    if request.path.startswith('/inpage/'):
+                        return result['inpage']()
+                    elif request.path.startswith(('/api/vue/','/test/')):
+                        return result['api']()
+                    else:
+                        return result['html']()
+                except KeyError:
+                    return result
 
         wrapper.__name__ = f.__name__
         return wrapper
 
     return wrapper_maker
+
+
+SANCTIONS=[
+    "CU",   #Cuba
+    "IR",   #Iran
+    "KP",   #North Korea
+    "SY",   #Syria
+    "TR",   #Turkey
+    "VE",   #Venezuela
+]
+
+def no_sanctions(f):
+
+    def wrapper(*args, **kwargs):
+
+        if request.headers.get("cf-ipcountry","") in SANCTIONS:
+            abort(451)
+
+        return f(*args, **kwargs)
+
+    wrapper.__name__=f.__name__
+    return wrapper
+
+
+

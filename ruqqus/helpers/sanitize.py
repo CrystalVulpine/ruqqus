@@ -4,6 +4,7 @@ from bleach.linkifier import LinkifyFilter
 from urllib.parse import urlparse, ParseResult, urlunparse
 from functools import partial
 from .get import *
+import os.path
 
 _allowed_tags = tags = ['b',
                         'blockquote',
@@ -36,7 +37,8 @@ _allowed_tags = tags = ['b',
                         ]
 
 _allowed_tags_with_links = _allowed_tags + ["a",
-                                            "img"
+                                            "img",
+                                            'span'
                                             ]
 
 _allowed_tags_in_bio = [
@@ -54,26 +56,35 @@ _allowed_tags_in_bio = [
     'sup'
 ]
 
-_allowed_attributes = {'a': ['href', 'title', "rel"],
-                       'i': [],
-                       'img': ['src', 'class']
-                       }
+_allowed_attributes = {
+    'a': ['href', 'title', "rel", "data-original-name"],
+    'i': [],
+    'span': ['style', 'data-toggle', 'title'],
+    'img': ['src', 'class']
+    }
 
-_allowed_protocols = ['http', 'https']
+_allowed_protocols = [
+    'http', 
+    'https'
+    ]
+
+_allowed_styles =[
+    'color'
+]
 
 # filter to make all links show domain on hover
 
 
-def nofollow(attrs, new=False):
+def a_modify(attrs, new=False):
 
     raw_url=attrs.get((None, "href"), None)
     if raw_url:
         parsed_url = urlparse(raw_url)
 
         domain = parsed_url.netloc
+        attrs[(None, "target")] = "_blank"
         if domain and not domain.endswith(("ruqqus.com", "ruqq.us")):
             attrs[(None, "rel")] = "nofollow noopener"
-            attrs[(None, "target")] = "_blank"
 
             # Force https for all external links in comments
             # (Ruqqus already forces its own https)
@@ -89,6 +100,10 @@ def nofollow(attrs, new=False):
     return attrs
 
 
+
+
+
+
 _clean_wo_links = bleach.Cleaner(tags=_allowed_tags,
                                  attributes=_allowed_attributes,
                                  protocols=_allowed_protocols,
@@ -96,10 +111,11 @@ _clean_wo_links = bleach.Cleaner(tags=_allowed_tags,
 _clean_w_links = bleach.Cleaner(tags=_allowed_tags_with_links,
                                 attributes=_allowed_attributes,
                                 protocols=_allowed_protocols,
+                                styles=_allowed_styles,
                                 filters=[partial(LinkifyFilter,
                                                  skip_tags=["pre"],
                                                  parse_email=False,
-                                                 callbacks=[nofollow]
+                                                 callbacks=[a_modify]
                                                  )
                                          ]
                                 )
@@ -110,7 +126,7 @@ _clean_bio = bleach.Cleaner(tags=_allowed_tags_in_bio,
                             filters=[partial(LinkifyFilter,
                                              skip_tags=["pre"],
                                              parse_email=False,
-                                             callbacks=[nofollow]
+                                             callbacks=[a_modify]
                                              )
                                      ]
                             )
@@ -126,8 +142,10 @@ def sanitize(text, bio=False, linkgen=False):
         else:
             sanitized = _clean_w_links.clean(text)
 
+        #soupify
         soup = BeautifulSoup(sanitized, features="html.parser")
 
+        #img elements - embed
         for tag in soup.find_all("img"):
 
             url = tag.get("src", "")
@@ -138,7 +156,8 @@ def sanitize(text, bio=False, linkgen=False):
             domain = get_domain(netloc)
             if not(netloc) or (domain and domain.show_thumbnail):
 
-                if "profile-pic-20" not in tag.get("class", ""):
+                if not any([x in tag.attrs.get("class","") for x in ['emoji', 'profile-pic-20']]):
+                    #print(tag.get('class'))
                     # set classes and wrap in link
 
                     tag["rel"] = "nofollow"
@@ -163,9 +182,39 @@ def sanitize(text, bio=False, linkgen=False):
                 new_tag["rel"] = "nofollow noopener"
                 tag.replace_with(new_tag)
 
+        #disguised link preventer
+        for tag in soup.find_all("a"):
+
+            if re.match("https?://\S+", str(tag.string)):
+                try:
+                    tag.string = tag["href"]
+                except:
+                    tag.string = ""
+
+        #clean up tags in code
+        for tag in soup.find_all("code"):
+            tag.contents=[x.string for x in tag.contents if x.string]
+
+        #whatever else happens with images, there are only three sets of classes allowed
+        for tag in soup.find_all("img"):
+                
+            if not any([x in tag.attrs.get("class","") for x in ['emoji', 'profile-pic-20']]):
+                tag.attrs['class']="in-comment-image rounded-sm my-2"
+
+        #same goes for span
+        for tag in soup.find_all("span"):
+            tag.attrs['class']='spoiler' if 'spoiler' in tag.attrs.get('class','') else ''
+
+        #table format
+        for tag in soup.find_all("table"):
+            tag.attrs['class']="table table-striped"
+
+        for tag in soup.find_all("thead"):
+            tag.attrs['class']="bg-primary text-white"
+
         sanitized = str(soup)
 
     else:
         sanitized = _clean_wo_links.clean(text)
-
+    
     return sanitized

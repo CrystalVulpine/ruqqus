@@ -1,5 +1,6 @@
 from sqlalchemy import *
 from sqlalchemy.orm import relationship, deferred, lazyload
+from sqlalchemy.types import Enum
 import time
 
 from ruqqus.helpers.base36 import *
@@ -15,7 +16,6 @@ from .comment import Comment
 from .mix_ins import *
 from ruqqus.__main__ import Base, cache
 
-
 class Board(Base, Stndrd, Age_times):
 
     __tablename__ = "boards"
@@ -24,34 +24,46 @@ class Board(Base, Stndrd, Age_times):
     name = Column(String)
     created_utc = Column(Integer)
     description = Column(String)
-    description_html = Column(String)
-    over_18 = Column(Boolean, default=False)
-    is_nsfl = Column(Boolean, default=False)
-    is_banned = Column(Boolean, default=False)
-    has_banner = Column(Boolean, default=False)
-    has_profile = Column(Boolean, default=False)
-    creator_id = Column(Integer, ForeignKey("users.id"))
-    ban_reason = Column(String(256), default=None)
-    color = Column(String(8), default="805ad5")
-    restricted_posting = Column(Boolean, default=False)
-    hide_banner_data = Column(Boolean, default=False)
-    profile_nonce = Column(Integer, default=0)
-    banner_nonce = Column(Integer, default=0)
-    is_private = Column(Boolean, default=False)
-    color_nonce = Column(Integer, default=0)
-    rank_trending = Column(Float, default=0)
-    stored_subscriber_count = Column(Integer, default=1)
-    all_opt_out = Column(Boolean, default=False)
-    is_siegable=Column(Boolean, default=True)
 
-    moderators = relationship("ModRelationship")
-    subscribers = relationship("Subscription", lazy="dynamic")
-    submissions = relationship("Submission",
-                               primaryjoin="Board.id==Submission.board_id")
-    contributors = relationship("ContributorRelationship", lazy="dynamic")
-    bans = relationship("BanRelationship", lazy="dynamic")
-    postrels = relationship("PostRelationship", lazy="dynamic")
-    trending_rank = deferred(Column(Float, server_default=FetchedValue()))
+    description_html=Column(String)
+    over_18=Column(Boolean, default=False)
+    is_nsfl=Column(Boolean, default=False)
+    is_banned=Column(Boolean, default=False)
+    has_banner=Column(Boolean, default=False)
+    has_profile=Column(Boolean, default=False)
+    creator_id=Column(Integer, ForeignKey("users.id"))
+    ban_reason=Column(String(256), default=None)
+    color=Column(String(8), default=app.config.get("SITE_COLOR","805ad5"))
+    restricted_posting=Column(Boolean, default=False)
+    disallowbots=Column(Boolean, default=False)
+    hide_banner_data=Column(Boolean, default=False)
+    profile_nonce=Column(Integer, default=0)
+    banner_nonce=Column(Integer, default=0)
+    is_private=Column(Boolean, default=False)
+    color_nonce=Column(Integer, default=0)
+    rank_trending=Column(Float, default=0)
+    stored_subscriber_count=Column(Integer, default=1)
+    all_opt_out=Column(Boolean, default=False)
+    is_siegable=Column(Boolean, default=True)
+    is_locked_category = Column(Boolean, default=False)
+    subcat_id=Column(Integer, ForeignKey("subcategories.id"), default=0)
+    secondary_color=Column(String(6), default="ffffff")
+    public_chat=Column(Boolean, default=False)
+    motd = Column(String(1000), default='')
+
+    css_nonce=Column(Integer, default=0)
+    css=deferred(Column(String(65536), default=''))
+
+    subcat=relationship("SubCategory")
+    moderators=relationship("ModRelationship")
+    subscribers=relationship("Subscription", lazy="dynamic")
+    submissions=relationship("Submission", primaryjoin="Board.id==Submission.board_id")
+    contributors=relationship("ContributorRelationship", lazy="dynamic")
+    bans=relationship("BanRelationship", lazy="dynamic")
+    chatbans=relationship("ChatBan", lazy="dynamic")
+    postrels=relationship("PostRelationship", lazy="dynamic")
+
+    trending_rank=deferred(Column(Float, server_default=FetchedValue()))
 
     # db side functions
     subscriber_count = deferred(Column(Integer, server_default=FetchedValue()))
@@ -80,9 +92,11 @@ class Board(Base, Stndrd, Age_times):
     @property
     def mods(self):
 
-        z = [x.user for x in self.moderators if x.accepted]
+        z = [x for x in self.moderators if x.accepted]
 
         z = sorted(z, key=lambda x: x.id)
+
+        z = [x.user for x in z]
 
         return z
 
@@ -95,10 +109,16 @@ class Board(Base, Stndrd, Age_times):
         return z
 
     @property
+    def mod_invites(self):
+        z = [x for x in self.moderators if x.accepted ==
+             False and x.invite_rescinded == False]
+        z = sorted(z, key=lambda x: x.id)
+        return z
+
+    @property
     def mods_count(self):
 
-        return len(
-            [x for x in self.moderators if x.accepted and not x.invite_rescinded and not x.user.is_deleted])
+        return len(self.mods_list)
 
     @property
     def permalink(self):
@@ -111,20 +131,22 @@ class Board(Base, Stndrd, Age_times):
         return not self.postrels.filter_by(post_id=post.id).first()
 
     @cache.memoize(timeout=60)
-    def idlist(self, sort="hot", page=1, t=None,
-               show_offensive=True, v=None, nsfw=False, **kwargs):
+    def idlist(self, sort=None, page=1, t=None,
+               hide_offensive=True, hide_bot=False, v=None, nsfw=False, **kwargs):
 
         posts = g.db.query(Submission.id).options(lazyload('*')).filter_by(is_banned=False,
-                                                                           is_deleted=False,
-                                                                           is_pinned=False,
+                                                                           #is_pinned=False,
                                                                            board_id=self.id
-                                                                           )
+                                                                           ).filter(Submission.deleted_utc == 0)
 
         if not nsfw:
             posts = posts.filter_by(over_18=False)
 
         if v and v.hide_offensive:
             posts = posts.filter_by(is_offensive=False)
+			
+        if v and v.hide_bot and not self.has_mod(v, "content"):
+            posts = posts.filter_by(is_bot=False)
 
         if v and not v.show_nsfl:
             posts = posts.filter_by(is_nsfl=False)
@@ -145,15 +167,16 @@ class Board(Base, Stndrd, Age_times):
             blocking = g.db.query(
                 UserBlock.target_id).filter_by(
                 user_id=v.id).subquery()
-            blocked = g.db.query(
-                UserBlock.user_id).filter_by(
-                target_id=v.id).subquery()
+            # blocked = g.db.query(
+            #     UserBlock.user_id).filter_by(
+            #     target_id=v.id).subquery()
 
             posts = posts.filter(
-                Submission.author_id.notin_(blocking),
-                Submission.author_id.notin_(blocked)
+                Submission.author_id.notin_(blocking) #,
+            #    Submission.author_id.notin_(blocked)
             )
 
+        if t == None and v: t = v.defaulttime
         if t:
             now = int(time.time())
             if t == 'day':
@@ -177,10 +200,18 @@ class Board(Base, Stndrd, Age_times):
         if lt:
             posts = posts.filter(Submission.created_utc < lt)
 
+        if sort == None:
+            if v: sort = v.defaultsorting
+            else: sort = "hot"
+
+        if sort != "new" and sort != "old": posts.filter_by(is_pinned=False)
+
         if sort == "hot":
             posts = posts.order_by(Submission.score_best.desc())
         elif sort == "new":
             posts = posts.order_by(Submission.created_utc.desc())
+        elif sort == "old":
+            posts = posts.order_by(Submission.created_utc.asc())
         elif sort == "disputed":
             posts = posts.order_by(Submission.score_disputed.desc())
         elif sort == "top":
@@ -194,7 +225,35 @@ class Board(Base, Stndrd, Age_times):
 
         return posts
 
-    def has_mod(self, user):
+    def has_mod(self, user, perm=None):
+
+        if user is None:
+            return None
+
+        if self.is_banned:
+            return False
+
+        m=self.__dict__.get("_mod")
+        if not m:
+            for x in user.moderates:
+                if x.board_id == self.id and x.accepted and not x.invite_rescinded:
+                    self.__dict__["mod"]=x
+                    m=x
+        
+        if not m:
+            return False
+                    
+        if perm:
+
+            return m if (m.perm_full or m.__dict__[f"perm_{perm}"]) else False
+
+        else:
+            return m
+
+
+        return False
+
+    def has_mod_record(self, user, perm=None):
 
         if user is None:
             return None
@@ -203,11 +262,15 @@ class Board(Base, Stndrd, Age_times):
             return False
 
         for x in user.moderates:
-            if x.board_id == self.id and x.accepted and not x.invite_rescinded:
-                return x
+            if x.board_id == self.id and not x.invite_rescinded:
+                
+                if perm:
+                    return x if x.__dict__[f"perm_{perm}"] else False
+                else:
+                    return x
+
 
         return False
-
     def can_invite_mod(self, user):
 
         return user.id not in [
@@ -235,18 +298,41 @@ class Board(Base, Stndrd, Age_times):
 
         if user is None:
             return None
+        
+        if user.admin_level >=2:
+            return None
 
         return g.db.query(BanRelationship).filter_by(
             board_id=self.id, user_id=user.id, is_active=True).first()
 
+    def has_chat_ban(self, user):
+
+        if user is None:
+            return None
+        
+        if user.admin_level >=4:
+            return None
+
+        return g.db.query(ChatBan).filter_by(
+            board_id=self.id, user_id=user.id).first()
+
     def has_subscriber(self, user):
+        
+        return self.is_subscribed
+    
+    @property
+    @lazy
+    def is_subscribed(self):
 
-        if not user:
-            return False
+        #print(self._is_subscribed)
 
-        return self.id in [
-            x.board_id for x in user.subscriptions if x.is_active]
-
+        x=self.__dict__.get("_is_subscribed")
+        if isinstance(x, bool):
+            return x
+        elif isinstance(x,int):
+            x=g.db.query(Subscription).get(x)
+        return x
+    
     def has_contributor(self, user):
 
         if user is None:
@@ -293,10 +379,30 @@ class Board(Base, Stndrd, Age_times):
 
         return True
 
-    def can_view(self, user):
+    def can_chat(self, user):
 
         if user is None:
             return False
+
+        if user.admin_level>=4:
+            return True
+
+        if user.is_suspended:
+            return False
+
+        if self.has_ban(user) or self.has_chat_ban(user):
+            return False
+
+        if self.has_contributor(user) or self.has_mod(user):
+            return True
+
+        return self.public_chat
+
+
+    def can_view(self, user):
+
+        if user is None:
+            return not self.is_private
 
         if user.admin_level >= 4:
             return True
@@ -305,8 +411,7 @@ class Board(Base, Stndrd, Age_times):
                 user) or self.has_invite(user):
             return True
 
-        if self.is_private:
-            return False
+        return not self.is_private
 
     def set_profile(self, file):
 
@@ -364,11 +469,11 @@ class Board(Base, Stndrd, Age_times):
 
     @property
     def css_url(self):
-        return f"/assets/{self.name}/main/{self.color_nonce}.css"
+        return f"/assets/{self.fullname}/main/{self.color_nonce}.css"
 
     @property
     def css_dark_url(self):
-        return f"/assets/{self.name}/dark/{self.color_nonce}.css"
+        return f"/assets/{self.fullname}/dark/{self.color_nonce}.css"
 
     def has_participant(self, user):
         return (g.db.query(Submission).filter_by(original_board_id=self.id, author_id=user.id).first() or
@@ -408,6 +513,7 @@ class Board(Base, Stndrd, Age_times):
                 'is_banned': False,
                 'is_private': self.is_private,
                 'is_restricted': self.restricted_posting,
+                'disallowbots': self.disallowbots,
                 'id': self.base36id,
                 'fullname': self.fullname,
                 'banner_url': self.banner_url,
@@ -426,6 +532,7 @@ class Board(Base, Stndrd, Age_times):
 
         data['guildmasters']=[x.json_core for x in self.mods]
         data['subscriber_count']= self.subscriber_count
+        data['disallowbots']= self.disallowbots
 
         return data
     
@@ -463,6 +570,9 @@ class Board(Base, Stndrd, Age_times):
 
         if v and v.hide_offensive:
             comments = comments.filter_by(is_offensive=False)
+			
+        if v and v.hide_bot and not self.has_mod(v, "content"):
+            comments = comments.filter_by(is_bot=False)
 
         if v and not self.has_mod(v) and v.admin_level <= 3:
             # blocks
@@ -479,7 +589,7 @@ class Board(Base, Stndrd, Age_times):
             )
 
         if not v or not v.admin_level >= 3:
-            comments = comments.filter_by(is_deleted=False, is_banned=False)
+            comments = comments.filter_by(is_banned=False).filter(Comment.deleted_utc == 0)
 
         comments = comments.join(
             posts, Comment.parent_submission == posts.c.id)
@@ -493,3 +603,40 @@ class Board(Base, Stndrd, Age_times):
     def user_guild_rep(self, user):
 
         return user.guild_rep(self)
+
+
+    def is_guildmaster(self, perm=None):
+        mod=self.__dict__.get('_is_guildmaster', False)
+        if not mod:
+            return False
+        if not perm:
+            return True
+
+        return mod.__dict__[f"perm_{perm}"]
+
+
+    @property
+    def siege_rep_requirement(self):
+
+        now=int(time.time())
+
+        return self.stored_subscriber_count//10 + min(180, (now-self.created_utc)//(60*60*24))
+
+    @property
+    def chat_url(self):
+        return f"{self.permalink}/chat"
+
+    @property
+    def custom_css_url(self):
+        return f"{self.permalink}/css?v={self.css_nonce}"
+
+    # @property
+    # def chat_count(self):
+    #     count= r.get(f"{self.fullname}_chat_count")
+
+    #     if count==None:
+    #         count=0
+    #     else:
+    #         count=int(count.decode('utf-8'))
+
+    #     return count

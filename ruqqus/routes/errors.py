@@ -4,14 +4,28 @@ from ruqqus.classes.custom_errors import *
 from flask import *
 from urllib.parse import quote, urlencode
 import time
-from ruqqus.__main__ import app
+from ruqqus.__main__ import app, r, cache
+import gevent
 
 # Errors
 
 
+def error_wrapper(f):
+
+    def wrapper(*args, **kwargs):
+
+        resp=make_response(f(*args, **kwargs))
+        g.db.rollback()
+        g.db.close()
+        return resp
+
+    wrapper.__name__=f.__name__
+    return wrapper
+
 
 
 @app.errorhandler(401)
+@error_wrapper
 def error_401(e):
 
     path = request.path
@@ -25,6 +39,7 @@ def error_401(e):
         return redirect(output)
 
 @app.errorhandler(PaymentRequired)
+@error_wrapper
 @auth_desired
 @api()
 def error_402(e, v):
@@ -33,6 +48,7 @@ def error_402(e, v):
            }
 
 @app.errorhandler(403)
+@error_wrapper
 @auth_desired
 @api()
 def error_403(e, v):
@@ -42,6 +58,7 @@ def error_403(e, v):
 
 
 @app.errorhandler(404)
+@error_wrapper
 @auth_desired
 @api()
 def error_404(e, v):
@@ -51,6 +68,7 @@ def error_404(e, v):
 
 
 @app.errorhandler(405)
+@error_wrapper
 @auth_desired
 @api()
 def error_405(e, v):
@@ -60,6 +78,7 @@ def error_405(e, v):
 
 
 @app.errorhandler(409)
+@error_wrapper
 @auth_desired
 @api()
 def error_409(e, v):
@@ -69,6 +88,7 @@ def error_409(e, v):
 
 
 @app.errorhandler(413)
+@error_wrapper
 @auth_desired
 @api()
 def error_413(e, v):
@@ -78,6 +98,7 @@ def error_413(e, v):
 
 
 @app.errorhandler(422)
+@error_wrapper
 @auth_desired
 @api()
 def error_422(e, v):
@@ -87,15 +108,46 @@ def error_422(e, v):
 
 
 @app.errorhandler(429)
+@error_wrapper
 @auth_desired
 @api()
 def error_429(e, v):
+
+    ip=request.remote_addr
+
+    #get recent violations
+    if r:
+        count_429s = r.get(f"429_count_{ip}")
+        if not count_429s:
+            count_429s=0
+        else:
+            count_429s=int(count_429s)
+
+        count_429s+=1
+
+        r.set(f"429_count_{ip}", count_429s)
+        r.expire(f"429_count_{ip}", 60)
+
+        #if you exceed 30x 429 without a 60s break, you get IP banned for 1 hr:
+        if count_429s>=30:
+            try:
+                print("triggering IP ban", request.remote_addr, session.get("user_id"), session.get("history"))
+            except:
+                pass
+            
+            r.set(f"ban_ip_{ip}", int(time.time()))
+            r.expire(f"ban_ip_{ip}", 3600)
+            return "", 429
+
+
+
     return{"html": lambda: (render_template('errors/429.html', v=v), 429),
            "api": lambda: (jsonify({"error": "429 Too Many Requests"}), 429)
            }
 
 
 @app.errorhandler(451)
+@error_wrapper
 @auth_desired
 @api()
 def error_451(e, v):
@@ -105,14 +157,31 @@ def error_451(e, v):
 
 
 @app.errorhandler(500)
+@error_wrapper
 @auth_desired
 @api()
 def error_500(e, v):
-    g.db.rollback()
+    try:
+        g.db.rollback()
+    except AttributeError:
+        pass
+
     return{"html": lambda: (render_template('errors/500.html', v=v), 500),
            "api": lambda: (jsonify({"error": "500 Internal Server Error"}), 500)
            }
 
+@app.errorhandler(503)
+@error_wrapper
+@api()
+def error_503(e):
+    try:
+        g.db.rollback()
+    except AttributeError:
+        pass
+
+    return{"html": lambda: (render_template('errors/503.html'), 503),
+           "api": lambda: (jsonify({"error": "503 Service Unavailable"}), 503)
+           }
 
 @app.route("/allow_nsfw_logged_in/<bid>", methods=["POST"])
 @auth_required
@@ -197,3 +266,13 @@ def error_all_preview(eid, v):
      eid=int(eid)
      return render_template(f"errors/{eid}.html", v=v)
 
+
+
+@app.errorhandler(DatabaseOverload)
+@error_wrapper
+@auth_desired
+@api()
+def error_402(e, v):
+    return{"html": lambda: (render_template('errors/overload.html', v=v), 500),
+           "api": lambda: (jsonify({"error": "500 Internal Server Error (database overload)"}), 500)
+           }
